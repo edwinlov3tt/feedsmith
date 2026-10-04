@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { decryptSecret, encryptSecret, safeEqual } from '../src/core/crypto.ts';
 import { HttpClient, parsePublicHttpsUrl, siteHosts } from '../src/core/http.ts';
 import { VariantSchema } from '../src/core/model.ts';
-import { batchRequests, checkBatchStatus, pushVariants } from '../src/pipeline/meta.ts';
+import { batchRequests, checkBatchStatus, pushVariants, upsertProductSet } from '../src/pipeline/meta.ts';
 import { compareKeys, evaluateGates } from '../src/pipeline/run.ts';
 import { testSite } from './helpers.ts';
 
@@ -144,6 +144,59 @@ describe('meta batch payload', () => {
 
   it('refuses a non-numeric catalog ID instead of building a URL from it', async () => {
     await expect(pushVariants({ catalogId: '123/../../me', token: 't', graphVersion: 'v23.0' }, [variant], async () => new Response('{}'))).rejects.toThrow();
+  });
+});
+
+describe('meta product sets', () => {
+  const target = { catalogId: '123456789', token: 'tok', graphVersion: 'v23.0' };
+  const set = { slug: 'womens', name: "Women's", filter: { gender: { eq: 'female' } } };
+
+  function fakeMeta(existingId: string | null) {
+    const calls: Array<{ method: string; url: string; body: string }> = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      calls.push({ method: init?.method ?? 'GET', url, body: typeof init?.body === 'string' ? init.body : '' });
+      if (url.includes('/product_sets?')) return new Response(JSON.stringify({ data: existingId ? [{ id: existingId, retailer_id: 'feedsmith:womens' }] : [] }));
+      if (url.endsWith('/product_sets')) return new Response(JSON.stringify({ id: '555000111' }));
+      return new Response(JSON.stringify({ success: true }));
+    };
+    return { calls, fetchImpl };
+  }
+
+  it('creates a new set tagged with retailer_id feedsmith:<slug>', async () => {
+    const { calls, fetchImpl } = fakeMeta(null);
+    expect(await upsertProductSet(target, { ...set, metaSetId: null }, fetchImpl)).toEqual({ metaSetId: '555000111', action: 'created' });
+    const create = calls.find((c) => c.method === 'POST');
+    const form = new URLSearchParams(create?.body);
+    expect(create?.url).toBe('https://graph.facebook.com/v23.0/123456789/product_sets');
+    expect(form.get('retailer_id')).toBe('feedsmith:womens');
+    expect(JSON.parse(form.get('filter') ?? '')).toEqual({ gender: { eq: 'female' } });
+  });
+
+  it('re-finds a set Feedsmith made earlier instead of duplicating it', async () => {
+    const { calls, fetchImpl } = fakeMeta('777000222');
+    expect(await upsertProductSet(target, { ...set, metaSetId: null }, fetchImpl)).toEqual({ metaSetId: '777000222', action: 'adopted' });
+    expect(calls.some((c) => c.url.endsWith('/product_sets') && c.method === 'POST')).toBe(false);
+    expect(calls.at(-1)?.url).toBe('https://graph.facebook.com/v23.0/777000222');
+  });
+
+  it('links to a hand-made set with the same filter when Meta reports a duplicate (10803)', async () => {
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes('retailer_id=')) return new Response(JSON.stringify({ data: [] }));
+      if (url.includes('fields=id%2Cname%2Cfilter')) {
+        return new Response(JSON.stringify({ data: [{ id: '111', filter: '{"gender":{"eq":"male"}}' }, { id: '999000444', filter: '{"gender":{"eq":"Female"}}' }] }));
+      }
+      if (init?.method === 'POST') return new Response(JSON.stringify({ error: { message: 'Product set with the same filters already exists', code: 10803 } }), { status: 400 });
+      return new Response('{}');
+    };
+    expect(await upsertProductSet(target, { ...set, metaSetId: null }, fetchImpl)).toEqual({ metaSetId: '999000444', action: 'adopted' });
+  });
+
+  it('updates a set it already knows', async () => {
+    const { calls, fetchImpl } = fakeMeta(null);
+    expect(await upsertProductSet(target, { ...set, metaSetId: '888000333' }, fetchImpl)).toEqual({ metaSetId: '888000333', action: 'updated' });
+    expect(calls).toHaveLength(1);
   });
 });
 

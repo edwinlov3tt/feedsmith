@@ -35,11 +35,13 @@ const SiteRow = z.object({
   meta_catalog_id: z.string().nullable(),
   meta_token_enc: z.string().nullable(),
   last_discovery_count: z.number().nullable(),
+  client_id: z.string().nullable(),
   created_at: z.string(),
   updated_at: z.string(),
 });
 
 export interface SiteRecord extends Site {
+  clientId: string | null;
   hasMetaToken: boolean;
   createdAt: string;
   updatedAt: string;
@@ -55,13 +57,14 @@ function toSite(raw: unknown): SiteRecord {
     config: SiteConfigSchema.parse(JSON.parse(row.config_json)),
     metaCatalogId: row.meta_catalog_id,
     lastDiscoveryCount: row.last_discovery_count,
+    clientId: row.client_id,
     hasMetaToken: row.meta_token_enc !== null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
 }
 
-const SITE_COLUMNS = 'id, name, base_url, platform, config_json, meta_catalog_id, meta_token_enc, last_discovery_count, created_at, updated_at';
+const SITE_COLUMNS = 'id, name, base_url, platform, config_json, meta_catalog_id, meta_token_enc, last_discovery_count, client_id, created_at, updated_at';
 
 export async function getSite(db: D1Database, id: string): Promise<SiteRecord | null> {
   const row = await db.prepare(`SELECT ${SITE_COLUMNS} FROM sites WHERE id = ?`).bind(id).first();
@@ -551,4 +554,121 @@ export async function variantStats(db: D1Database, siteId: string): Promise<Reco
     out[r.availability] = r.n;
   }
   return out;
+}
+
+// ---------- clients ----------
+
+const ClientRow = z.object({ id: z.string(), name: z.string(), notes: z.string().nullable(), created_at: z.string(), updated_at: z.string() });
+export interface Client {
+  id: string;
+  name: string;
+  notes: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+function toClient(raw: unknown): Client {
+  const r = ClientRow.parse(raw);
+  return { id: r.id, name: r.name, notes: r.notes, createdAt: r.created_at, updatedAt: r.updated_at };
+}
+
+export async function insertClient(db: D1Database, c: { id: string; name: string; notes: string | null }): Promise<void> {
+  const ts = now();
+  await db.prepare('INSERT INTO clients (id, name, notes, created_at, updated_at) VALUES (?, ?, ?, ?, ?)').bind(c.id, c.name, c.notes, ts, ts).run();
+}
+
+export async function getClient(db: D1Database, id: string): Promise<Client | null> {
+  const row = await db.prepare('SELECT * FROM clients WHERE id = ?').bind(id).first();
+  return row ? toClient(row) : null;
+}
+
+export async function listClients(db: D1Database): Promise<Client[]> {
+  const { results } = await db.prepare('SELECT * FROM clients ORDER BY id').all();
+  return results.map(toClient);
+}
+
+export async function updateClient(db: D1Database, id: string, name: string, notes: string | null): Promise<void> {
+  await db.prepare('UPDATE clients SET name = ?, notes = ?, updated_at = ? WHERE id = ?').bind(name, notes, now(), id).run();
+}
+
+export async function setSiteClient(db: D1Database, siteId: string, clientId: string | null): Promise<void> {
+  await db.prepare('UPDATE sites SET client_id = ?, updated_at = ? WHERE id = ?').bind(clientId, now(), siteId).run();
+}
+
+export async function siteClientIds(db: D1Database): Promise<Map<string, string | null>> {
+  const { results } = await db.prepare('SELECT id, client_id FROM sites').all();
+  return new Map(results.map((raw) => {
+    const r = z.object({ id: z.string(), client_id: z.string().nullable() }).parse(raw);
+    return [r.id, r.client_id] as const;
+  }));
+}
+
+// ---------- product sets ----------
+
+const SetRow = z.object({
+  site_id: z.string(),
+  slug: z.string(),
+  name: z.string(),
+  filter_json: z.string(),
+  meta_set_id: z.string().nullable(),
+  meta_synced_at: z.string().nullable(),
+  meta_error: z.string().nullable(),
+  created_at: z.string(),
+  updated_at: z.string(),
+});
+
+export interface StoredSet {
+  siteId: string;
+  slug: string;
+  name: string;
+  /** Meta-format filter JSON as stored; parse with parseSetFilter before use. */
+  filter: unknown;
+  metaSetId: string | null;
+  metaSyncedAt: string | null;
+  metaError: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+function toSet(raw: unknown): StoredSet {
+  const r = SetRow.parse(raw);
+  let filter: unknown = null;
+  try {
+    filter = JSON.parse(r.filter_json);
+  } catch {
+    filter = null;
+  }
+  return { siteId: r.site_id, slug: r.slug, name: r.name, filter, metaSetId: r.meta_set_id, metaSyncedAt: r.meta_synced_at, metaError: r.meta_error, createdAt: r.created_at, updatedAt: r.updated_at };
+}
+
+export async function listSets(db: D1Database, siteId: string): Promise<StoredSet[]> {
+  const { results } = await db.prepare('SELECT * FROM product_sets WHERE site_id = ? ORDER BY created_at, slug').bind(siteId).all();
+  return results.map(toSet);
+}
+
+export async function getSet(db: D1Database, siteId: string, slug: string): Promise<StoredSet | null> {
+  const row = await db.prepare('SELECT * FROM product_sets WHERE site_id = ? AND slug = ?').bind(siteId, slug).first();
+  return row ? toSet(row) : null;
+}
+
+export async function upsertSet(db: D1Database, siteId: string, slug: string, name: string, filter: unknown): Promise<void> {
+  const ts = now();
+  await db
+    .prepare(
+      `INSERT INTO product_sets (site_id, slug, name, filter_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT (site_id, slug) DO UPDATE SET name = excluded.name, filter_json = excluded.filter_json, updated_at = excluded.updated_at`,
+    )
+    .bind(siteId, slug, name, JSON.stringify(filter), ts, ts)
+    .run();
+}
+
+export async function recordSetSync(db: D1Database, siteId: string, slug: string, metaSetId: string | null, error: string | null): Promise<void> {
+  await db
+    .prepare('UPDATE product_sets SET meta_set_id = COALESCE(?, meta_set_id), meta_synced_at = CASE WHEN ? IS NULL THEN ? ELSE meta_synced_at END, meta_error = ? WHERE site_id = ? AND slug = ?')
+    .bind(metaSetId, error, now(), error?.slice(0, 500) ?? null, siteId, slug)
+    .run();
+}
+
+export async function deleteSet(db: D1Database, siteId: string, slug: string): Promise<void> {
+  await db.prepare('DELETE FROM product_sets WHERE site_id = ? AND slug = ?').bind(siteId, slug).run();
 }

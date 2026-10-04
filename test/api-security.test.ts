@@ -35,6 +35,17 @@ const ADMIN_ROUTES: Array<[string, string]> = [
   ['GET', '/admin/runs/00000000-0000-4000-8000-000000000000/meta-status'],
   ['GET', '/admin/sites/supe-store/changes'],
   ['POST', '/admin/sites/supe-store/preview'],
+  ['POST', '/admin/clients'],
+  ['GET', '/admin/clients'],
+  ['GET', '/admin/clients/ua-supply-store'],
+  ['PATCH', '/admin/clients/ua-supply-store'],
+  ['PUT', '/admin/sites/supe-store/client'],
+  ['GET', '/admin/sites/supe-store/product-sets'],
+  ['PUT', '/admin/sites/supe-store/product-sets/womens'],
+  ['DELETE', '/admin/sites/supe-store/product-sets/womens'],
+  ['POST', '/admin/sites/supe-store/product-sets/defaults'],
+  ['POST', '/admin/sites/supe-store/product-sets/sync'],
+  ['GET', '/admin/sites/supe-store/product-sets/womens/items'],
 ];
 
 describe('admin API auth', () => {
@@ -73,6 +84,16 @@ describe('public surface', () => {
     const res = await app.request('/anything/else', {}, env());
     expect(res.status).toBe(404);
     expect(res.headers.get('content-type')).toContain('application/json');
+  });
+
+  it('asks for Basic auth on a product set feed', async () => {
+    const res = await app.request(
+      '/feeds/supe-store/sets/womens/meta.csv',
+      {},
+      env({ DB: { prepare: () => ({ bind: () => ({ first: async () => null }) }) } }),
+    );
+    expect(res.status).toBe(401);
+    expect(res.headers.get('www-authenticate')).toContain('Basic');
   });
 
   it('asks for Basic auth on the feed', async () => {

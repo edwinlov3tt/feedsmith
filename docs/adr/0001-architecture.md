@@ -75,6 +75,14 @@ carries `custom_label_0` department, `custom_label_1` clearance,
 filter on (docs/product-sets.md). Labels live on the product row, so sweeps
 keep them without rediscovering.
 
+**7c. Clients and product sets (2026-10-04).** Sites belong to clients.
+Product sets are stored per site in Meta's own filter JSON (parsed and
+validated into a typed tree), so one definition is both synced to Meta and
+evaluated locally for live counts, item lists and per-set feeds. Sets Feedsmith
+creates carry `retailer_id = feedsmith:<slug>` so they are re-found rather than
+duplicated; when Meta reports an identical filter already exists (error 10803),
+the existing set is adopted and keeps its name.
+
 **8. Idempotent queue handling.** Outcomes are keyed (run, product) with
 INSERT OR IGNORE. The last reader claims finalize with a conditional UPDATE, and
 finalize itself is claimed by queue message ID, so a redelivery proceeds but a

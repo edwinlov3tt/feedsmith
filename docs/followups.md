@@ -9,12 +9,11 @@ Non-blocking items, most important first.
   queues `feedsmith-crawl` and `feedsmith-crawl-dlq`). Secrets live in
   `.secrets/` (git-ignored, mode 600): `admin-token`, `token-enc-key`,
   `feed-password-supe-store`. Move them into a password manager.
-- **VERIFY-LIVE: Meta Batch API.** `src/pipeline/meta.ts` follows Meta's docs but
-  has only been tested against a mocked Graph API. Needs the store's catalog ID
-  and a system-user token with `catalog_management`. Then also poll
-  `check_batch_request_status` for the returned handles and record rejections.
 - **Verified 2026-10-04: Commerce Manager scheduled URL feed with a password**
   fetches `/feeds/supe-store/meta.csv` (test catalog 2072477680053581).
+- **Verified 2026-10-04: Batch API and product sets** against test catalog
+  2072477680053581: 5,398 items pushed in 6 batches, all `finished` with 0
+  errors; 8 product sets created/adopted, update and delete calls succeeded.
 - **Install the GTM tag** (`gtm/prismrbs-meta-events.html`) in GTM-KB52PZMG, and
   turn off Meta's "Track events automatically without code" so its estimated
   AddToCart stops double counting. Tested live with a stubbed pixel only.

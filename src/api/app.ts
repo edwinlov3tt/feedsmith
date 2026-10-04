@@ -10,9 +10,22 @@ import { SiteConfigPatchSchema, SiteConfigSchema, SiteIdSchema, validatePatterns
 import { CatalogIdSchema, checkBatchStatus, verifyCatalogAccess } from '../pipeline/meta.ts';
 import { feedKey } from '../pipeline/publish.ts';
 import { httpFor, startRun } from '../pipeline/run.ts';
+import { countSets, defaultSetDefinitions, metaTargetFor, setCsv, setItems, storedFilter, syncSet, unsyncSet } from '../pipeline/sets.ts';
+import { parseSetFilter, SET_FIELDS, toMetaFilter } from '../core/set-filter.ts';
 import {
+  deleteSet,
+  getClient,
   getFeedPasswordHash,
   getMetaTokenEnc,
+  getSet,
+  insertClient,
+  listClients,
+  listSets,
+  setSiteClient,
+  updateClient,
+  upsertSet,
+  type Client,
+  type StoredSet,
   getRun,
   getSite,
   insertSite,
@@ -60,6 +73,7 @@ const SiteSchema = z
     config: z.record(z.string(), z.unknown()),
     metaCatalogId: z.string().nullable(),
     metaConnected: z.boolean(),
+    clientId: z.string().nullable(),
     lastDiscoveryCount: z.number().nullable(),
     feedUrl: z.string(),
     createdAt: z.string(),
@@ -101,6 +115,7 @@ function siteDto(site: SiteRecord, origin: string): z.infer<typeof SiteSchema> {
     config: site.config,
     metaCatalogId: site.metaCatalogId,
     metaConnected: site.hasMetaToken,
+    clientId: site.clientId,
     lastDiscoveryCount: site.lastDiscoveryCount,
     feedUrl: feedUrlFor(origin, site.id),
     createdAt: site.createdAt,
@@ -127,6 +142,14 @@ function normalizeBaseUrl(raw: string): string | null {
 
 function patternError(config: z.infer<typeof ConfigInput>): string | null {
   return validatePatterns([...(config.includeUrlPatterns ?? []), ...(config.excludeUrlPatterns ?? [])]);
+}
+
+/** Feed URLs use HTTP Basic: user = site ID, password = the site's feed password. */
+async function feedAuthorized(db: D1Database, siteId: string, header: string | undefined): Promise<boolean> {
+  const creds = basicCredentials(header);
+  const hash = await getFeedPasswordHash(db, siteId);
+  // Same answer for unknown site and wrong password, so site IDs can't be probed.
+  return creds !== null && hash !== null && creds.user === siteId && (await safeEqual(await sha256Hex(creds.password), hash));
 }
 
 // ---------- health ----------
@@ -162,6 +185,7 @@ app.openapi(
               name: z.string().trim().min(1).max(200),
               baseUrl: z.string().max(500),
               platform: z.enum(PLATFORMS).optional(),
+              clientId: SiteIdSchema.optional(),
               config: ConfigInput.optional(),
             }),
           },
@@ -184,6 +208,7 @@ app.openapi(
     const bad = patternError(config);
     if (bad) return c.json({ error: bad }, 422);
     if (await getSite(c.env.DB, body.id)) return c.json({ error: 'site ID already exists' }, 409);
+    if (body.clientId && !(await getClient(c.env.DB, body.clientId))) return c.json({ error: 'client not found; create it first' }, 422);
 
     let platform = body.platform ?? null;
     if (!platform) {
@@ -196,6 +221,7 @@ app.openapi(
     const site: Site = { id: body.id, name: body.name, baseUrl, platform, config, metaCatalogId: null, lastDiscoveryCount: null };
     const feedPassword = randomToken();
     await insertSite(c.env.DB, site, await sha256Hex(feedPassword));
+    if (body.clientId) await setSiteClient(c.env.DB, site.id, body.clientId);
     const saved = await getSite(c.env.DB, site.id);
     if (!saved) throw new Error('site vanished after insert');
     return c.json({ site: siteDto(saved, new URL(c.req.url).origin), feedPassword }, 201);
@@ -579,11 +605,7 @@ app.openapi(
   }),
   async (c) => {
     const { siteId } = c.req.valid('param');
-    const creds = basicCredentials(c.req.header('authorization'));
-    const hash = await getFeedPasswordHash(c.env.DB, siteId);
-    // Same response for unknown site and wrong password, so site IDs can't be probed.
-    const valid = creds !== null && hash !== null && creds.user === siteId && (await safeEqual(await sha256Hex(creds.password), hash));
-    if (!valid) {
+    if (!(await feedAuthorized(c.env.DB, siteId, c.req.header('authorization')))) {
       c.header('WWW-Authenticate', 'Basic realm="feedsmith", charset="UTF-8"');
       return c.json({ error: 'unauthorized' }, 401);
     }
@@ -595,6 +617,381 @@ app.openapi(
       'last-modified': object.uploaded.toUTCString(),
       'x-feed-items': object.customMetadata?.['items'] ?? '',
     });
+  },
+);
+
+// ---------- clients ----------
+
+const ClientSchema = z
+  .object({ id: z.string(), name: z.string(), notes: z.string().nullable(), siteIds: z.array(z.string()), createdAt: z.string(), updatedAt: z.string() })
+  .openapi('Client');
+const ClientIdParam = z.object({ clientId: SiteIdSchema.openapi({ param: { name: 'clientId', in: 'path' }, example: 'ua-supply-store' }) });
+
+async function clientDto(db: D1Database, client: Client): Promise<z.infer<typeof ClientSchema>> {
+  const sites = await listSites(db);
+  return { ...client, siteIds: sites.filter((s) => s.clientId === client.id).map((s) => s.id) };
+}
+
+app.openapi(
+  createRoute({
+    method: 'post',
+    path: '/admin/clients',
+    tags: ['Clients'],
+    summary: 'Add a client',
+    description: 'A client is the business Feedsmith runs feeds for. Sites (storefronts) belong to a client.',
+    security: admin,
+    request: { body: { content: { 'application/json': { schema: z.object({ id: SiteIdSchema, name: z.string().trim().min(1).max(200), notes: z.string().trim().max(2000).optional() }).strict() } } } },
+    responses: { 201: { description: 'Created', content: { 'application/json': { schema: z.object({ client: ClientSchema }) } } }, ...invalid, ...unauthorized, 409: { description: 'Client ID taken', content: { 'application/json': { schema: ErrorSchema } } } },
+  }),
+  async (c) => {
+    const body = c.req.valid('json');
+    if (await getClient(c.env.DB, body.id)) return c.json({ error: 'client ID already exists' }, 409);
+    await insertClient(c.env.DB, { id: body.id, name: body.name, notes: body.notes ?? null });
+    const client = await getClient(c.env.DB, body.id);
+    if (!client) throw new Error('client vanished after insert');
+    return c.json({ client: await clientDto(c.env.DB, client) }, 201);
+  },
+);
+
+app.openapi(
+  createRoute({
+    method: 'get',
+    path: '/admin/clients',
+    tags: ['Clients'],
+    summary: 'List clients',
+    security: admin,
+    responses: { 200: { description: 'Clients', content: { 'application/json': { schema: z.object({ clients: z.array(ClientSchema) }) } } }, ...unauthorized },
+  }),
+  async (c) => {
+    const sites = await listSites(c.env.DB);
+    const clients = await listClients(c.env.DB);
+    return c.json({ clients: clients.map((cl) => ({ ...cl, siteIds: sites.filter((s) => s.clientId === cl.id).map((s) => s.id) })) }, 200);
+  },
+);
+
+app.openapi(
+  createRoute({
+    method: 'get',
+    path: '/admin/clients/{clientId}',
+    tags: ['Clients'],
+    summary: 'A client with its sites',
+    security: admin,
+    request: { params: ClientIdParam },
+    responses: {
+      200: { description: 'Client', content: { 'application/json': { schema: z.object({ client: ClientSchema, sites: z.array(SiteSchema) }) } } },
+      ...unauthorized,
+      ...notFound,
+    },
+  }),
+  async (c) => {
+    const { clientId } = c.req.valid('param');
+    const client = await getClient(c.env.DB, clientId);
+    if (!client) return c.json({ error: 'client not found' }, 404);
+    const origin = new URL(c.req.url).origin;
+    const sites = (await listSites(c.env.DB)).filter((s) => s.clientId === clientId);
+    return c.json({ client: { ...client, siteIds: sites.map((s) => s.id) }, sites: sites.map((s) => siteDto(s, origin)) }, 200);
+  },
+);
+
+app.openapi(
+  createRoute({
+    method: 'patch',
+    path: '/admin/clients/{clientId}',
+    tags: ['Clients'],
+    summary: 'Rename a client or edit notes',
+    security: admin,
+    request: { params: ClientIdParam, body: { content: { 'application/json': { schema: z.object({ name: z.string().trim().min(1).max(200).optional(), notes: z.string().trim().max(2000).nullable().optional() }).strict() } } } },
+    responses: { 200: { description: 'Updated', content: { 'application/json': { schema: z.object({ client: ClientSchema }) } } }, ...invalid, ...unauthorized, ...notFound },
+  }),
+  async (c) => {
+    const { clientId } = c.req.valid('param');
+    const body = c.req.valid('json');
+    const client = await getClient(c.env.DB, clientId);
+    if (!client) return c.json({ error: 'client not found' }, 404);
+    await updateClient(c.env.DB, clientId, body.name ?? client.name, body.notes === undefined ? client.notes : body.notes);
+    const saved = await getClient(c.env.DB, clientId);
+    if (!saved) return c.json({ error: 'client not found' }, 404);
+    return c.json({ client: await clientDto(c.env.DB, saved) }, 200);
+  },
+);
+
+app.openapi(
+  createRoute({
+    method: 'put',
+    path: '/admin/sites/{siteId}/client',
+    tags: ['Clients'],
+    summary: 'Assign a site to a client (or unassign with null)',
+    security: admin,
+    request: { params: SiteIdParam, body: { content: { 'application/json': { schema: z.object({ clientId: SiteIdSchema.nullable() }).strict() } } } },
+    responses: { 200: { description: 'Assigned', content: { 'application/json': { schema: z.object({ site: SiteSchema }) } } }, ...invalid, ...unauthorized, ...notFound, 422: { description: 'Unknown client', content: { 'application/json': { schema: ErrorSchema } } } },
+  }),
+  async (c) => {
+    const { siteId } = c.req.valid('param');
+    const { clientId } = c.req.valid('json');
+    if (!(await getSite(c.env.DB, siteId))) return c.json({ error: 'site not found' }, 404);
+    if (clientId && !(await getClient(c.env.DB, clientId))) return c.json({ error: 'client not found' }, 422);
+    await setSiteClient(c.env.DB, siteId, clientId);
+    const saved = await getSite(c.env.DB, siteId);
+    if (!saved) return c.json({ error: 'site not found' }, 404);
+    return c.json({ site: siteDto(saved, new URL(c.req.url).origin) }, 200);
+  },
+);
+
+// ---------- product sets ----------
+
+const SetSlugSchema = z.string().regex(/^[a-z0-9][a-z0-9-]{0,47}$/, 'lowercase letters, digits and dashes, up to 48 chars');
+const SetParams = z.object({
+  siteId: SiteIdSchema.openapi({ param: { name: 'siteId', in: 'path' }, example: 'supe-store' }),
+  slug: SetSlugSchema.openapi({ param: { name: 'slug', in: 'path' }, example: 'womens' }),
+});
+const FilterJson = z
+  .record(z.string(), z.unknown())
+  .openapi({
+    description: `Meta product set filter JSON. Fields: ${SET_FIELDS.join(', ')}. Combine with {"and": [...]} / {"or": [...]}. Operators: eq, neq, contains, not_contains, i_contains, i_not_contains, is_any, is_not_any; price_amount (cents) takes lt, lte, gt, gte. {} matches everything.`,
+    example: { and: [{ availability: { eq: 'in stock' } }, { gender: { eq: 'female' } }] },
+  });
+const ProductSetSchema = z
+  .object({
+    slug: z.string(),
+    name: z.string(),
+    filter: z.unknown(),
+    items: z.number(),
+    feedUrl: z.string(),
+    metaSetId: z.string().nullable(),
+    metaSyncedAt: z.string().nullable(),
+    metaError: z.string().nullable(),
+    updatedAt: z.string(),
+  })
+  .openapi('ProductSet');
+const SyncOutcomeSchema = z.object({ slug: z.string(), ok: z.boolean(), action: z.string().optional(), metaSetId: z.string().optional(), error: z.string().optional() });
+
+function setDto(set: StoredSet, items: number, origin: string): z.infer<typeof ProductSetSchema> {
+  return {
+    slug: set.slug,
+    name: set.name,
+    filter: set.filter,
+    items,
+    feedUrl: `${origin}/feeds/${set.siteId}/sets/${set.slug}/meta.csv`,
+    metaSetId: set.metaSetId,
+    metaSyncedAt: set.metaSyncedAt,
+    metaError: set.metaError,
+    updatedAt: set.updatedAt,
+  };
+}
+
+function outcomeDto(o: Awaited<ReturnType<typeof syncSet>>): z.infer<typeof SyncOutcomeSchema> {
+  return o.ok ? { slug: o.slug, ok: true, action: o.result.action, metaSetId: o.result.metaSetId } : { slug: o.slug, ok: false, error: o.error };
+}
+
+app.openapi(
+  createRoute({
+    method: 'get',
+    path: '/admin/sites/{siteId}/product-sets',
+    tags: ['Product sets'],
+    summary: "A site's product sets with live item counts",
+    security: admin,
+    request: { params: SiteIdParam },
+    responses: { 200: { description: 'Sets', content: { 'application/json': { schema: z.object({ sets: z.array(ProductSetSchema) }) } } }, ...unauthorized, ...notFound },
+  }),
+  async (c) => {
+    const { siteId } = c.req.valid('param');
+    if (!(await getSite(c.env.DB, siteId))) return c.json({ error: 'site not found' }, 404);
+    const sets = await listSets(c.env.DB, siteId);
+    const counts = await countSets(c.env.DB, siteId, sets);
+    const origin = new URL(c.req.url).origin;
+    return c.json({ sets: sets.map((s) => setDto(s, counts.get(s.slug) ?? 0, origin)) }, 200);
+  },
+);
+
+app.openapi(
+  createRoute({
+    method: 'put',
+    path: '/admin/sites/{siteId}/product-sets/{slug}',
+    tags: ['Product sets'],
+    summary: 'Create or update a product set',
+    description: "Saves the set, then syncs it to the site's Meta catalog when one is connected. Sets are filters, so they stay current as the feed changes.",
+    security: admin,
+    request: { params: SetParams, body: { content: { 'application/json': { schema: z.object({ name: z.string().trim().min(1).max(200), filter: FilterJson }).strict() } } } },
+    responses: {
+      200: { description: 'Saved', content: { 'application/json': { schema: z.object({ set: ProductSetSchema, meta: SyncOutcomeSchema.nullable() }) } } },
+      ...invalid,
+      ...unauthorized,
+      ...notFound,
+      422: { description: 'Invalid filter', content: { 'application/json': { schema: ErrorSchema } } },
+    },
+  }),
+  async (c) => {
+    const { siteId, slug } = c.req.valid('param');
+    const { name, filter } = c.req.valid('json');
+    const site = await getSite(c.env.DB, siteId);
+    if (!site) return c.json({ error: 'site not found' }, 404);
+    const parsed = parseSetFilter(filter);
+    if (!parsed.ok) return c.json({ error: parsed.error }, 422);
+    await upsertSet(c.env.DB, siteId, slug, name, toMetaFilter(parsed.filter));
+    const target = await metaTargetFor(c.env, site);
+    let saved = await getSet(c.env.DB, siteId, slug);
+    if (!saved) throw new Error('set vanished after save');
+    const meta = target ? outcomeDto(await syncSet(c.env, siteId, target, saved)) : null;
+    saved = (await getSet(c.env.DB, siteId, slug)) ?? saved;
+    const counts = await countSets(c.env.DB, siteId, [saved]);
+    return c.json({ set: setDto(saved, counts.get(slug) ?? 0, new URL(c.req.url).origin), meta }, 200);
+  },
+);
+
+app.openapi(
+  createRoute({
+    method: 'delete',
+    path: '/admin/sites/{siteId}/product-sets/{slug}',
+    tags: ['Product sets'],
+    summary: 'Delete a product set (here and on Meta)',
+    description: 'Meta refuses to delete a set that live ads use; the error is returned and the set is kept.',
+    security: admin,
+    request: { params: SetParams },
+    responses: { 204: { description: 'Deleted' }, ...unauthorized, ...notFound, 502: { description: 'Meta refused the delete', content: { 'application/json': { schema: ErrorSchema } } } },
+  }),
+  async (c) => {
+    const { siteId, slug } = c.req.valid('param');
+    const site = await getSite(c.env.DB, siteId);
+    const set = site ? await getSet(c.env.DB, siteId, slug) : null;
+    if (!site || !set) return c.json({ error: 'set not found' }, 404);
+    const target = await metaTargetFor(c.env, site);
+    if (target && set.metaSetId) {
+      try {
+        await unsyncSet(target, set);
+      } catch (err) {
+        return c.json({ error: err instanceof Error ? err.message : String(err) }, 502);
+      }
+    }
+    await deleteSet(c.env.DB, siteId, slug);
+    return c.body(null, 204);
+  },
+);
+
+app.openapi(
+  createRoute({
+    method: 'post',
+    path: '/admin/sites/{siteId}/product-sets/defaults',
+    tags: ['Product sets'],
+    summary: 'Create the recommended sets from labels in the feed',
+    description:
+      'All in stock (excluding clearance), one per department, Women\'s, Kids and Clearance, based on what the current feed contains. Existing slugs are left untouched unless overwrite=true. Syncs to Meta when connected.',
+    security: admin,
+    request: { params: SiteIdParam, query: z.object({ overwrite: z.enum(['true', 'false']).default('false') }) },
+    responses: {
+      200: {
+        description: 'Created sets',
+        content: { 'application/json': { schema: z.object({ created: z.array(z.string()), skipped: z.array(z.string()), meta: z.array(SyncOutcomeSchema) }) } },
+      },
+      ...unauthorized,
+      ...notFound,
+    },
+  }),
+  async (c) => {
+    const { siteId } = c.req.valid('param');
+    const { overwrite } = c.req.valid('query');
+    const site = await getSite(c.env.DB, siteId);
+    if (!site) return c.json({ error: 'site not found' }, 404);
+    const existing = new Set((await listSets(c.env.DB, siteId)).map((s) => s.slug));
+    const created: string[] = [];
+    const skipped: string[] = [];
+    for (const def of await defaultSetDefinitions(c.env.DB, siteId)) {
+      if (existing.has(def.slug) && overwrite !== 'true') {
+        skipped.push(def.slug);
+        continue;
+      }
+      await upsertSet(c.env.DB, siteId, def.slug, def.name, def.filter);
+      created.push(def.slug);
+    }
+    const target = await metaTargetFor(c.env, site);
+    const meta: Array<z.infer<typeof SyncOutcomeSchema>> = [];
+    if (target) {
+      for (const set of await listSets(c.env.DB, siteId)) if (created.includes(set.slug)) meta.push(outcomeDto(await syncSet(c.env, siteId, target, set)));
+    }
+    return c.json({ created, skipped, meta }, 200);
+  },
+);
+
+app.openapi(
+  createRoute({
+    method: 'post',
+    path: '/admin/sites/{siteId}/product-sets/sync',
+    tags: ['Product sets'],
+    summary: "Push every set to the site's Meta catalog",
+    description: 'Creates sets Meta does not have yet (or re-finds ones Feedsmith created before) and updates the rest.',
+    security: admin,
+    request: { params: SiteIdParam },
+    responses: {
+      200: { description: 'Per-set results', content: { 'application/json': { schema: z.object({ results: z.array(SyncOutcomeSchema) }) } } },
+      ...unauthorized,
+      ...notFound,
+      422: { description: 'No Meta connection', content: { 'application/json': { schema: ErrorSchema } } },
+    },
+  }),
+  async (c) => {
+    const { siteId } = c.req.valid('param');
+    const site = await getSite(c.env.DB, siteId);
+    if (!site) return c.json({ error: 'site not found' }, 404);
+    const target = await metaTargetFor(c.env, site);
+    if (!target) return c.json({ error: 'site has no Meta connection' }, 422);
+    const results = [];
+    for (const set of await listSets(c.env.DB, siteId)) results.push(outcomeDto(await syncSet(c.env, siteId, target, set)));
+    return c.json({ results }, 200);
+  },
+);
+
+app.openapi(
+  createRoute({
+    method: 'get',
+    path: '/admin/sites/{siteId}/product-sets/{slug}/items',
+    tags: ['Product sets'],
+    summary: "A set's items (feed rows), paged",
+    security: admin,
+    request: { params: SetParams, query: z.object({ limit: z.coerce.number().int().min(1).max(1000).default(100), after: z.string().max(100).optional() }) },
+    responses: {
+      200: {
+        description: 'Items ordered by id; pass next as after for the following page',
+        content: { 'application/json': { schema: z.object({ items: z.array(z.record(z.string(), z.string())), next: z.string().nullable() }) } },
+      },
+      ...unauthorized,
+      ...notFound,
+    },
+  }),
+  async (c) => {
+    const { siteId, slug } = c.req.valid('param');
+    const { limit, after } = c.req.valid('query');
+    const set = await getSet(c.env.DB, siteId, slug);
+    const filter = set ? storedFilter(set) : null;
+    if (!set || !filter) return c.json({ error: 'set not found' }, 404);
+    return c.json(await setItems(c.env.DB, siteId, filter, limit, after ?? null), 200);
+  },
+);
+
+app.openapi(
+  createRoute({
+    method: 'get',
+    path: '/feeds/{siteId}/sets/{slug}/meta.csv',
+    tags: ['Feeds'],
+    summary: 'One product set as its own feed (CSV)',
+    description: "Only the set's items, in the same format as the full feed and with the same feed password.",
+    security: [{ FeedBasic: [] }],
+    request: { params: SetParams },
+    responses: {
+      200: { description: 'CSV feed', content: { 'text/csv': { schema: z.string() } } },
+      401: { description: 'Missing or wrong feed credentials', content: { 'application/json': { schema: ErrorSchema } } },
+      404: { description: 'No such set', content: { 'application/json': { schema: ErrorSchema } } },
+    },
+  }),
+  async (c) => {
+    const { siteId, slug } = c.req.valid('param');
+    if (!(await feedAuthorized(c.env.DB, siteId, c.req.header('authorization')))) {
+      c.header('WWW-Authenticate', 'Basic realm="feedsmith", charset="UTF-8"');
+      return c.json({ error: 'unauthorized' }, 401);
+    }
+    const set = await getSet(c.env.DB, siteId, slug);
+    const filter = set ? storedFilter(set) : null;
+    if (!set || !filter) return c.json({ error: 'set not found' }, 404);
+    const { body, items } = await setCsv(c.env.DB, siteId, filter);
+    return c.body(body, 200, { 'content-type': 'text/csv; charset=utf-8', 'cache-control': 'private, no-store', 'x-feed-items': String(items) });
   },
 );
 

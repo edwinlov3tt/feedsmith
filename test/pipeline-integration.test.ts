@@ -3,12 +3,15 @@
 // pages. Covers redelivery, crashes and the publish gates end to end.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { app } from '../src/api/app.ts';
 import { handleDeadLetter, handleMessage, startRun } from '../src/pipeline/run.ts';
+import { sha256Hex as sha256 } from '../src/core/crypto.ts';
 import { insertSite } from '../src/pipeline/store.ts';
 import { D1Shim, QueueShim, R2Shim, type QueuedMessage } from './d1-shim.ts';
 import { fixture, testSite } from './helpers.ts';
 
 const BASE = 'https://www.universitysupplystore.com/';
+const ADMIN = 'integration-admin-token-0123456789';
 const PRODUCTS = new Map([
   ['211098', fixture('prism-detail-multi.html')], // 6 variants
   ['206700', fixture('prism-detail-single.html')], // 1 variant
@@ -53,7 +56,7 @@ beforeEach(async () => {
   r2 = new R2Shim();
   // Test doubles implement only the binding methods the pipeline calls; the
   // full Cloudflare types (Env) can't be satisfied structurally by them.
-  env = { DB: db, CRAWL: queue, FEEDS: r2, USER_AGENT: 'test', META_GRAPH_VERSION: 'v23.0', ADMIN_TOKEN: 'x', TOKEN_ENC_KEY: 'x' } as unknown as Env;
+  env = { DB: db, CRAWL: queue, FEEDS: r2, USER_AGENT: 'test', META_GRAPH_VERSION: 'v23.0', ADMIN_TOKEN: ADMIN, TOKEN_ENC_KEY: 'x' } as unknown as Env;
   store = { listed: ['211098', '206700', '229'], detailStatus: 200 };
   stubStore(store);
   await insertSite(db as unknown as D1Database, testSite({ id: 'supe-store' }), 'hash');
@@ -248,6 +251,55 @@ describe('pipeline end to end', () => {
       PRODUCTS.delete('9001');
       PRODUCTS.delete('8001');
     }
+  });
+
+  it('stores clients and product sets, and serves a set separately from the catalog', async () => {
+    const id = await fullRun();
+    await drain();
+    expect(runRow(id)?.['status']).toBe('published');
+    const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; json: unknown }> => {
+      const res = await app.request(path, { method, headers: { authorization: `Bearer ${ADMIN}`, 'content-type': 'application/json' }, body: body === undefined ? null : JSON.stringify(body) }, env);
+      return { status: res.status, json: res.headers.get('content-type')?.includes('json') ? await res.json() : await res.text() };
+    };
+
+    // Clients own sites.
+    expect((await call('POST', '/admin/clients', { id: 'ua-supply-store', name: 'University of Alabama Supply Store' })).status).toBe(201);
+    expect((await call('PUT', '/admin/sites/supe-store/client', { clientId: 'ua-supply-store' })).status).toBe(200);
+    const client = await call('GET', '/admin/clients/ua-supply-store');
+    expect(client.json).toMatchObject({ client: { siteIds: ['supe-store'] }, sites: [{ id: 'supe-store', clientId: 'ua-supply-store' }] });
+
+    // Recommended sets come from the labels in the feed (no Meta connection here, so nothing syncs).
+    const defaults = await call('POST', '/admin/sites/supe-store/product-sets/defaults');
+    // The fixture store has a unisex tee, a men's tee and a book: only sets with items are made.
+    expect(defaults.json).toEqual({ created: ['all-in-stock'], skipped: [], meta: [] });
+
+    // A custom set, then the list with live counts.
+    const unisex = await call('PUT', '/admin/sites/supe-store/product-sets/unisex-tees', { name: 'Unisex tees', filter: { and: [{ gender: { eq: 'unisex' } }, { product_type: { i_contains: 't-shirt' } }] } });
+    expect(unisex.status).toBe(200);
+    expect(unisex.json).toMatchObject({ set: { slug: 'unisex-tees', items: 6 }, meta: null });
+    expect((await call('PUT', '/admin/sites/supe-store/product-sets/bad', { name: 'Bad', filter: { title: { eq: 'x' } } })).status).toBe(422);
+
+    const list = await call('GET', '/admin/sites/supe-store/product-sets');
+    const sets = (list.json as { sets: Array<{ slug: string; items: number }> }).sets;
+    expect(sets.find((s) => s.slug === 'all-in-stock')?.items).toBe(8);
+    expect(sets.find((s) => s.slug === 'womens')).toBeUndefined(); // no women's items in this fixture set
+    expect(sets.find((s) => s.slug === 'unisex-tees')?.items).toBe(6);
+
+    // Items, paged.
+    const page1 = await call('GET', '/admin/sites/supe-store/product-sets/unisex-tees/items?limit=4');
+    const p1 = page1.json as { items: Array<{ id: string }>; next: string | null };
+    expect(p1.items).toHaveLength(4);
+    const page2 = await call('GET', `/admin/sites/supe-store/product-sets/unisex-tees/items?limit=4&after=${p1.next}`);
+    expect((page2.json as { items: unknown[]; next: string | null }).items).toHaveLength(2);
+
+    // The set's own feed, with the site's feed password.
+    db.db.prepare("UPDATE sites SET feed_password_hash = ? WHERE id = 'supe-store'").run(await sha256('feed-pw'));
+    const feed = await app.request('/feeds/supe-store/sets/unisex-tees/meta.csv', { headers: { authorization: `Basic ${btoa('supe-store:feed-pw')}` } }, env);
+    expect(feed.status).toBe(200);
+    expect(feed.headers.get('x-feed-items')).toBe('6');
+    expect((await feed.text()).split('\r\n').filter(Boolean)).toHaveLength(7);
+
+    expect((await call('DELETE', '/admin/sites/supe-store/product-sets/unisex-tees')).status).toBe(204);
   });
 
   it('ignores a duplicate finalize message', async () => {

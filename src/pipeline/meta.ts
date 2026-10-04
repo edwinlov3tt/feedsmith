@@ -9,6 +9,7 @@
 
 import { z } from 'zod';
 import { feedProblem, toMetaRow } from '../core/feed.ts';
+import { asRecord } from '../core/json.ts';
 import { truncate } from '../core/normalize.ts';
 import type { Variant } from '../core/model.ts';
 
@@ -183,4 +184,128 @@ export async function verifyCatalogAccess(target: MetaTarget, fetchImpl: typeof 
   const parsed = z.object({ id: z.string(), name: z.string().default('') }).safeParse(body);
   if (!parsed.success || parsed.data.id !== target.catalogId) return { ok: false, error: 'catalog ID in response does not match' };
   return { ok: true, name: parsed.data.name };
+}
+
+// ---------- product sets ----------
+// POST /{catalog_id}/product_sets  name, filter (JSON string), retailer_id
+// GET  /{catalog_id}/product_sets?retailer_id=...   find our own set again
+// POST /{product_set_id}  name, filter      update
+// DELETE /{product_set_id}                  delete
+// Feedsmith tags every set it creates with retailer_id "feedsmith:<slug>", so a
+// lost meta_set_id (or a create whose response was lost) never duplicates a set.
+
+export const setRetailerId = (slug: string): string => `feedsmith:${slug}`;
+
+const ProductSetNode = z.object({ id: z.string(), name: z.string().optional(), retailer_id: z.string().optional() }).passthrough();
+
+async function graphCall(target: MetaTarget, url: string, init: RequestInit, fetchImpl: typeof fetch): Promise<unknown> {
+  const res = await fetchImpl(url, {
+    ...init,
+    headers: { authorization: `Bearer ${target.token}`, ...(init.headers ?? {}) },
+    signal: AbortSignal.timeout(TIMEOUT_MS),
+  });
+  const body: unknown = await res.json().catch(() => null);
+  if (!res.ok) {
+    const err = GraphError.safeParse(body);
+    const code = err.success && err.data.error.code !== undefined ? ` (code ${err.data.error.code})` : '';
+    throw new Error(`Meta ${res.status}${code}: ${err.success ? err.data.error.message : 'no error body'}`);
+  }
+  return body;
+}
+
+function setNodeUrl(target: MetaTarget, setId: string): string {
+  const version = /^v\d+\.\d+$/.test(target.graphVersion) ? target.graphVersion : 'v23.0';
+  return `${GRAPH}/${version}/${z.string().regex(/^\d{5,25}$/).parse(setId)}`;
+}
+
+function form(fields: Record<string, string>): RequestInit {
+  return { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(fields).toString() };
+}
+
+export async function findProductSet(target: MetaTarget, slug: string, fetchImpl: typeof fetch = fetch.bind(globalThis)): Promise<string | null> {
+  const params = new URLSearchParams({ retailer_id: setRetailerId(slug), fields: 'id,name,retailer_id', limit: '25' });
+  const body = await graphCall(target, `${graphUrl(target, '/product_sets')}?${params}`, { method: 'GET' }, fetchImpl);
+  const list = z.object({ data: z.array(ProductSetNode) }).safeParse(body);
+  // Match on retailer_id ourselves too, in case Meta ignores the filter param.
+  return list.success ? (list.data.data.find((s) => s.retailer_id === setRetailerId(slug))?.id ?? null) : null;
+}
+
+/** Order-independent comparison of filter JSON (Meta may reorder keys). */
+function canonical(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(canonical).join(',')}]`;
+  const rec = asRecord(v);
+  if (rec) {
+    return `{${Object.keys(rec)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${canonical(rec[k])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(typeof v === 'string' ? v.toLowerCase() : v);
+}
+
+/** Finds a catalog set whose filter equals `filter`, paging through up to 1,000 sets. */
+export async function findSetByFilter(target: MetaTarget, filter: Record<string, unknown>, fetchImpl: typeof fetch = fetch.bind(globalThis)): Promise<string | null> {
+  const want = canonical(filter);
+  let url: string | null = `${graphUrl(target, '/product_sets')}?${new URLSearchParams({ fields: 'id,name,filter', limit: '200' })}`;
+  for (let page = 0; url && page < 5; page++) {
+    const body = await graphCall(target, url, { method: 'GET' }, fetchImpl);
+    const parsed = z
+      .object({ data: z.array(z.object({ id: z.string(), filter: z.string().optional() }).passthrough()), paging: z.object({ next: z.string().optional() }).passthrough().optional() })
+      .safeParse(body);
+    if (!parsed.success) return null;
+    for (const s of parsed.data.data) {
+      try {
+        if (s.filter && canonical(JSON.parse(s.filter)) === want) return s.id;
+      } catch {
+        // A filter Meta returns in some other form can't be ours.
+      }
+    }
+    const next = parsed.data.paging?.next ?? null;
+    // Only follow Graph API pagination links.
+    url = next && new URL(next).hostname === 'graph.facebook.com' ? next : null;
+  }
+  return null;
+}
+
+export interface SetSyncResult {
+  metaSetId: string;
+  action: 'created' | 'updated' | 'adopted';
+}
+
+/** Creates or updates one product set on Meta. */
+export async function upsertProductSet(
+  target: MetaTarget,
+  set: { slug: string; name: string; filter: Record<string, unknown>; metaSetId: string | null },
+  fetchImpl: typeof fetch = fetch.bind(globalThis),
+): Promise<SetSyncResult> {
+  const fields = { name: set.name, filter: JSON.stringify(set.filter) };
+  let id = set.metaSetId;
+  let action: SetSyncResult['action'] = 'updated';
+  if (!id) {
+    id = await findProductSet(target, set.slug, fetchImpl);
+    action = 'adopted';
+  }
+  if (id) {
+    await graphCall(target, setNodeUrl(target, id), form(fields), fetchImpl);
+    return { metaSetId: id, action };
+  }
+  let created: unknown;
+  try {
+    created = await graphCall(target, graphUrl(target, '/product_sets'), form({ ...fields, retailer_id: setRetailerId(set.slug) }), fetchImpl);
+  } catch (err) {
+    // 10803: the catalog already has a set with exactly this filter (often one
+    // made by hand in Commerce Manager). Link to it rather than fail; its name
+    // is left as the owner chose it.
+    if (!(err instanceof Error && err.message.includes('(code 10803)'))) throw err;
+    const existing = await findSetByFilter(target, set.filter, fetchImpl);
+    if (!existing) throw err;
+    return { metaSetId: existing, action: 'adopted' };
+  }
+  const parsed = z.object({ id: z.string() }).safeParse(created);
+  if (!parsed.success) throw new Error('Meta created the set but returned no id');
+  return { metaSetId: parsed.data.id, action: 'created' };
+}
+
+export async function deleteProductSet(target: MetaTarget, metaSetId: string, fetchImpl: typeof fetch = fetch.bind(globalThis)): Promise<void> {
+  await graphCall(target, setNodeUrl(target, metaSetId), { method: 'DELETE' }, fetchImpl);
 }
