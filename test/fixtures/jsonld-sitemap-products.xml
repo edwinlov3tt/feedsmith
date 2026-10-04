@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+<url>
+    <loc>https://www.tentree.com/</loc>
+    <changefreq>daily</changefreq>
+  </url>
+<url>
+    <loc>https://www.tentree.com/products/e-gift-code</loc>
+    <lastmod>2026-10-02T14:10:36-07:00</lastmod>
+    <changefreq>daily</changefreq>
+    <image:image>
+      <image:loc>https://cdn.shopify.com/s/files/1/2341/3995/products/E-Gift-Code_PDP-Image.jpg?v=1674512590</image:loc>
+      <image:title>E-Gift Code</image:title>
+      <image:caption>E-Gift-Code_PDP-Tentree</image:caption>
+    </image:image>
+  </url>
+<url>
+    <loc>https://www.tentree.com/products/mens-juniper-hoodie-sweet-birch-yellow-heather</loc>
+    <lastmod>2026-10-02T14:10:36-07:00</lastmod>
+    <changefreq>daily</changefreq>
+    <image:image>
+      <image:loc>https://cdn.shopify.com/s/files/1/2341/3995/products/TCM1763-05011.jpg?v=1588354907</image:loc>
+      <image:title>Juniper Hoodie</image:title>
+      <image:caption>Brown Treelinen Graphic Pullover</image:caption>
+    </image:image>
+  </url>
+<url>
+    <loc>https://www.tentree.com/products/elms-t-shirt-olive-night-green</loc>
+    <lastmod>2026-10-02T14:10:36-07:00</lastmod>
+    <changefreq>daily</changefreq>
+    <image:image>
+      <image:loc>https://cdn.shopify.com/s/files/1/2341/3995/files/Green-bike-graphic-mens-t-shirt-TCM2360-0012_1.jpg?v=1769731321</image:loc>
+      <image:title>Elms T-Shirt</image:title>
+      <image:caption>OLIVE NIGHT GREEN_gallery *Model is 6&apos;2.5&quot;, wearing size M</image:caption>
+    </image:image>
+  </url>
+<url>
+    <loc>https://www.tentree.com/products/w-feather-wave-ss-tee</loc>
+    <lastmod>2026-10-02T14:10:36-07:00</lastmod>
+    <changefreq>daily</changefreq>
+    <image:image>
+      <image:loc>https://cdn.shopify.com/s/files/1/2341/3995/files/TCW1714-0451-Edit.jpg?v=1700853136</image:loc>
+      <image:title>Featherwave T-Shirt</image:title>
+      <image:caption> *Model is 5&apos;11&quot;, wearing size S</image:caption>
+    </image:image>
+  </url>
+<url>
+    <loc>https://www.tentree.com/products/cabin-pom-beanie</loc>
+    <lastmod>2026-10-02T14:10:36-07:00</lastmod>
+    <changefreq>daily</changefreq>
+    <image:image>
+      <image:loc>https://cdn.shopify.com/s/files/1/2341/3995/products/TAU1574-0459.jpg?v=1769731199</image:loc>
+      <image:title>Cabin Pom Beanie</image:title>
+      <image:caption>RUBBER BROWN_gallery</image:caption>
+    </image:image>
+  </url>
+</urlset>

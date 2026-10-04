@@ -1,0 +1,90 @@
+<!--
+  Feedsmith: Meta catalog events for PrismRBS storefronts.
+  GTM: Tags > New > Custom HTML. Paste this whole block.
+  Trigger: All Pages (DOM Ready). Fire once per page.
+  Requires the existing Meta pixel tag (fbq init) to fire first: set this tag's
+  Advanced Settings > Tag Sequencing > "Fire a tag before" = the Meta pixel tag.
+
+  What it sends, so the pixel matches the Feedsmith catalog feed:
+    Product page  -> ViewContent  content_type=product_group, content_ids=[pf_id]   (feed item_group_id)
+    Add to cart   -> AddToCart    content_type=product,       content_ids=[sku_id]  (feed id)
+  AddToCart fires only after the store confirms the add (returnCode "0"), so a
+  click without a size selected sends nothing.
+
+  After publishing, turn off Events Manager > Settings > "Track events
+  automatically without code" so Meta stops estimating its own AddToCart.
+-->
+<script>
+(function () {
+  if (window.__feedsmithMetaEvents) return;
+  window.__feedsmithMetaEvents = true;
+
+  var CURRENCY = 'USD';
+
+  function track(name, params) {
+    if (typeof window.fbq !== 'function') return;
+    window.fbq('track', name, params);
+  }
+
+  function price(text) {
+    var m = /(\d[\d,]*\.?\d*)/.exec(String(text || '').replace(/\s/g, ''));
+    return m ? Number(m[1].replace(/,/g, '')) : undefined;
+  }
+
+  function val(id) {
+    var el = document.getElementById(id);
+    return el && el.value ? String(el.value) : '';
+  }
+
+  var pfId = val('pf_id');
+  var nameEl = document.querySelector('h1.product-name');
+  var productName = nameEl ? nameEl.textContent.replace(/\s+/g, ' ').trim() : '';
+
+  // Product page: view of the whole product (all sizes) -> item_group_id.
+  if (pfId && /shop_product_detail\.asp/i.test(location.pathname)) {
+    var priceEl = document.querySelector('dd.product-price');
+    track('ViewContent', {
+      content_type: 'product_group',
+      content_ids: [pfId],
+      content_name: productName,
+      value: price(priceEl && priceEl.textContent),
+      currency: CURRENCY
+    });
+  }
+
+  // Add to cart: PrismRBS posts the form with fetch() to cart_ajax_add_item.asp.
+  if (typeof window.fetch !== 'function') return;
+  var originalFetch = window.fetch;
+  window.fetch = function (input, init) {
+    var result = originalFetch.apply(this, arguments);
+    try {
+      var url = typeof input === 'string' ? input : (input && input.url) || '';
+      var method = String((init && init.method) || (input && input.method) || 'GET').toUpperCase();
+      if (method === 'POST' && /cart_ajax_add_item\.asp/i.test(url)) {
+        var body = init && init.body;
+        var params = body instanceof URLSearchParams ? body
+          : (typeof FormData !== 'undefined' && body instanceof FormData) ? body
+          : new URLSearchParams(typeof body === 'string' ? body : '');
+        var sku = params.get('sku_id') || val('pf_sku');
+        var qty = Number(params.get('qty') || '1') || 1;
+        var unit = price((document.getElementById('price') || {}).textContent);
+        result.then(function (res) {
+          return res.clone().json().then(function (data) {
+            var state = data && data.state && data.state[0];
+            if (!sku || !state || String(state.returnCode) !== '0') return;
+            track('AddToCart', {
+              content_type: 'product',
+              content_ids: [sku],
+              contents: [{ id: sku, quantity: qty, item_price: unit }],
+              content_name: productName,
+              value: unit !== undefined ? Number((unit * qty).toFixed(2)) : undefined,
+              currency: CURRENCY
+            });
+          });
+        }).catch(function () { /* never interfere with the store's own handling */ });
+      }
+    } catch (e) { /* never break the page */ }
+    return result;
+  };
+})();
+</script>

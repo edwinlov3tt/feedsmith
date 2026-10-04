@@ -1,0 +1,36 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "feedsmith",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-30",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  // Product crawls fan out through the queue; full crawls nightly, stock sweeps every 2 hours.
+  "triggers": { "crons": ["15 7 * * *", "45 */2 * * *"] },
+  "d1_databases": [
+    { "binding": "DB", "database_name": "feedsmith", "database_id": "2bcdac38-e3b5-4def-968c-2af33389c029", "migrations_dir": "migrations" }
+  ],
+  "r2_buckets": [{ "binding": "FEEDS", "bucket_name": "feedsmith-feeds" }],
+  "queues": {
+    "producers": [{ "binding": "CRAWL", "queue": "feedsmith-crawl" }],
+    "consumers": [
+      {
+        "queue": "feedsmith-crawl",
+        // Each message carries up to 5 product refs; two messages per batch and two
+        // batches in flight keeps a site at a handful of concurrent requests.
+        "max_batch_size": 2,
+        "max_batch_timeout": 2,
+        "max_concurrency": 2,
+        "max_retries": 3,
+        "dead_letter_queue": "feedsmith-crawl-dlq"
+      },
+      // Records exhausted messages as errors so their run can still finalize.
+      { "queue": "feedsmith-crawl-dlq", "max_batch_size": 10, "max_retries": 5 }
+    ]
+  },
+  "vars": {
+    "USER_AGENT": "FeedsmithBot/0.1",
+    "META_GRAPH_VERSION": "v23.0"
+  }
+  // Secrets (wrangler secret put): ADMIN_TOKEN, TOKEN_ENC_KEY (base64, 32 bytes).
+}
