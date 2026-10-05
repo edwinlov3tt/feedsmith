@@ -45,6 +45,18 @@ Non-blocking items, most important first.
 - **Brands come from title keywords.** Anything without a keyword match gets the
   store name (4,154 of 5,034 items). A per-site keyword list covers the big
   brands; a real brand field isn't exposed by PrismRBS.
+- **Vehicles: which price to publish.** DealerOn pages show the structured offer
+  price (used now), plus `data-price` and `data-msrp` attributes. For example, a
+  2026 Bronco Sport is $33,118 structured, $35,518 data-price and $37,425 MSRP.
+  Confirm with the dealer which is the advertised price; MSRP could go in
+  `price` with the offer as `sale_price`.
+- **Vehicles: "Call for Price" cars** (18 of 284 at NorthStar Ford) have no price
+  anywhere and are left out of the feed, since Meta requires one.
+- **Vehicles pixel.** Dealer sites need `ViewContent` with `content_ids = VIN`
+  for vehicle retargeting; DealerOn's own pixel setup hasn't been checked.
+- **More dealer platforms.** Dealer.com, Dealer Inspire, DealerSocket. Two of the
+  four Google-Sheet-fed agency dealers (Griffeth Ford, New Bedford Mitsubishi)
+  return HTTP 403 to automated requests and need another approach.
 - **More adapters.** Shopify (`/products.json`) and WooCommerce Store API would
   be faster and more complete than JSON-LD for those platforms.
 - **PrismRBS adapter does not read robots.txt.** The Supply Store's robots.txt

@@ -2,16 +2,16 @@ import { createRoute, OpenAPIHono, z } from '@hono/zod-openapi';
 import { Scalar } from '@scalar/hono-api-reference';
 import { bodyLimit } from 'hono/body-limit';
 import { secureHeaders } from 'hono/secure-headers';
-import { adapterFor, detectPlatform } from '../adapters/registry.ts';
+import { adapterFor, catalogTypeOf, detectPlatform } from '../adapters/registry.ts';
 import { decryptSecret, encryptSecret, randomToken, safeEqual, sha256Hex } from '../core/crypto.ts';
 import { HttpClient, parsePublicHttpsUrl, siteHosts } from '../core/http.ts';
-import { AVAILABILITIES, PLATFORMS, VariantSchema } from '../core/model.ts';
+import { AVAILABILITIES, CATALOG_TYPES, PLATFORMS, VariantSchema } from '../core/model.ts';
 import { SiteConfigPatchSchema, SiteConfigSchema, SiteIdSchema, validatePatterns, type Site } from '../core/site.ts';
 import { CatalogIdSchema, checkBatchStatus, verifyCatalogAccess } from '../pipeline/meta.ts';
 import { feedKey } from '../pipeline/publish.ts';
 import { httpFor, startRun } from '../pipeline/run.ts';
 import { countSets, defaultSetDefinitions, metaTargetFor, setCsv, setItems, storedFilter, syncSet, unsyncSet } from '../pipeline/sets.ts';
-import { parseSetFilter, SET_FIELDS, toMetaFilter } from '../core/set-filter.ts';
+import { parseSetFilter, SET_FIELDS, toMetaFilter, VEHICLE_SET_FIELDS } from '../core/set-filter.ts';
 import {
   deleteSet,
   getClient,
@@ -70,6 +70,7 @@ const SiteSchema = z
     name: z.string(),
     baseUrl: z.string(),
     platform: z.enum(PLATFORMS),
+    catalogType: z.enum(CATALOG_TYPES),
     config: z.record(z.string(), z.unknown()),
     metaCatalogId: z.string().nullable(),
     metaConnected: z.boolean(),
@@ -112,6 +113,7 @@ function siteDto(site: SiteRecord, origin: string): z.infer<typeof SiteSchema> {
     name: site.name,
     baseUrl: site.baseUrl,
     platform: site.platform,
+    catalogType: catalogTypeOf(site.platform),
     config: site.config,
     metaCatalogId: site.metaCatalogId,
     metaConnected: site.hasMetaToken,
@@ -204,8 +206,7 @@ app.openapi(
     const body = c.req.valid('json');
     const baseUrl = normalizeBaseUrl(body.baseUrl);
     if (!baseUrl) return c.json({ error: 'baseUrl must be a public https URL' }, 422);
-    const config = SiteConfigSchema.parse(body.config ?? {});
-    const bad = patternError(config);
+    const bad = patternError(SiteConfigSchema.parse(body.config ?? {}));
     if (bad) return c.json({ error: bad }, 422);
     if (await getSite(c.env.DB, body.id)) return c.json({ error: 'site ID already exists' }, 409);
     if (body.clientId && !(await getClient(c.env.DB, body.clientId))) return c.json({ error: 'client not found; create it first' }, 422);
@@ -218,6 +219,11 @@ app.openapi(
       platform = detectPlatform(home.text);
       if (!platform) return c.json({ error: 'no supported platform detected; pass platform explicitly or add an adapter' }, 422);
     }
+    // Vehicles sell one at a time and their pages then 404, so a dealer's
+    // normal day reports far more "gone" items than a store. The gate still
+    // trips on a site-wide outage.
+    const typeDefaults = catalogTypeOf(platform) === 'vehicles' ? { maxGoneRate: 0.3, maxSoldOutRate: 0.3 } : {};
+    const config = SiteConfigSchema.parse({ ...typeDefaults, ...(body.config ?? {}) });
     const site: Site = { id: body.id, name: body.name, baseUrl, platform, config, metaCatalogId: null, lastDiscoveryCount: null };
     const feedPassword = randomToken();
     await insertSite(c.env.DB, site, await sha256Hex(feedPassword));
@@ -747,7 +753,7 @@ const SetParams = z.object({
 const FilterJson = z
   .record(z.string(), z.unknown())
   .openapi({
-    description: `Meta product set filter JSON. Fields: ${SET_FIELDS.join(', ')}. Combine with {"and": [...]} / {"or": [...]}. Operators: eq, neq, contains, not_contains, i_contains, i_not_contains, is_any, is_not_any; price_amount (cents) takes lt, lte, gt, gte. {} matches everything.`,
+    description: `Meta product set filter JSON. Product catalog fields: ${SET_FIELDS.join(', ')}. Vehicle catalog fields: ${VEHICLE_SET_FIELDS.join(', ')} (year is numeric). Combine with {"and": [...]} / {"or": [...]}. Operators: eq, neq, contains, not_contains, i_contains, i_not_contains, is_any, is_not_any; price_amount (cents) takes lt, lte, gt, gte. {} matches everything.`,
     example: { and: [{ availability: { eq: 'in stock' } }, { gender: { eq: 'female' } }] },
   });
 const ProductSetSchema = z
@@ -795,9 +801,10 @@ app.openapi(
   }),
   async (c) => {
     const { siteId } = c.req.valid('param');
-    if (!(await getSite(c.env.DB, siteId))) return c.json({ error: 'site not found' }, 404);
+    const site = await getSite(c.env.DB, siteId);
+    if (!site) return c.json({ error: 'site not found' }, 404);
     const sets = await listSets(c.env.DB, siteId);
-    const counts = await countSets(c.env.DB, siteId, sets);
+    const counts = await countSets(c.env.DB, siteId, catalogTypeOf(site.platform), sets);
     const origin = new URL(c.req.url).origin;
     return c.json({ sets: sets.map((s) => setDto(s, counts.get(s.slug) ?? 0, origin)) }, 200);
   },
@@ -825,15 +832,16 @@ app.openapi(
     const { name, filter } = c.req.valid('json');
     const site = await getSite(c.env.DB, siteId);
     if (!site) return c.json({ error: 'site not found' }, 404);
-    const parsed = parseSetFilter(filter);
+    const type = catalogTypeOf(site.platform);
+    const parsed = parseSetFilter(filter, type);
     if (!parsed.ok) return c.json({ error: parsed.error }, 422);
     await upsertSet(c.env.DB, siteId, slug, name, toMetaFilter(parsed.filter));
     const target = await metaTargetFor(c.env, site);
     let saved = await getSet(c.env.DB, siteId, slug);
     if (!saved) throw new Error('set vanished after save');
-    const meta = target ? outcomeDto(await syncSet(c.env, siteId, target, saved)) : null;
+    const meta = target ? outcomeDto(await syncSet(c.env, siteId, type, target, saved)) : null;
     saved = (await getSet(c.env.DB, siteId, slug)) ?? saved;
-    const counts = await countSets(c.env.DB, siteId, [saved]);
+    const counts = await countSets(c.env.DB, siteId, type, [saved]);
     return c.json({ set: setDto(saved, counts.get(slug) ?? 0, new URL(c.req.url).origin), meta }, 200);
   },
 );
@@ -894,7 +902,8 @@ app.openapi(
     const existing = new Set((await listSets(c.env.DB, siteId)).map((s) => s.slug));
     const created: string[] = [];
     const skipped: string[] = [];
-    for (const def of await defaultSetDefinitions(c.env.DB, siteId)) {
+    const type = catalogTypeOf(site.platform);
+    for (const def of await defaultSetDefinitions(c.env.DB, siteId, type)) {
       if (existing.has(def.slug) && overwrite !== 'true') {
         skipped.push(def.slug);
         continue;
@@ -905,7 +914,7 @@ app.openapi(
     const target = await metaTargetFor(c.env, site);
     const meta: Array<z.infer<typeof SyncOutcomeSchema>> = [];
     if (target) {
-      for (const set of await listSets(c.env.DB, siteId)) if (created.includes(set.slug)) meta.push(outcomeDto(await syncSet(c.env, siteId, target, set)));
+      for (const set of await listSets(c.env.DB, siteId)) if (created.includes(set.slug)) meta.push(outcomeDto(await syncSet(c.env, siteId, type, target, set)));
     }
     return c.json({ created, skipped, meta }, 200);
   },
@@ -934,7 +943,7 @@ app.openapi(
     const target = await metaTargetFor(c.env, site);
     if (!target) return c.json({ error: 'site has no Meta connection' }, 422);
     const results = [];
-    for (const set of await listSets(c.env.DB, siteId)) results.push(outcomeDto(await syncSet(c.env, siteId, target, set)));
+    for (const set of await listSets(c.env.DB, siteId)) results.push(outcomeDto(await syncSet(c.env, siteId, catalogTypeOf(site.platform), target, set)));
     return c.json({ results }, 200);
   },
 );
@@ -959,8 +968,9 @@ app.openapi(
   async (c) => {
     const { siteId, slug } = c.req.valid('param');
     const { limit, after } = c.req.valid('query');
-    const set = await getSet(c.env.DB, siteId, slug);
-    const filter = set ? storedFilter(set) : null;
+    const site = await getSite(c.env.DB, siteId);
+    const set = site ? await getSet(c.env.DB, siteId, slug) : null;
+    const filter = site && set ? storedFilter(set, catalogTypeOf(site.platform)) : null;
     if (!set || !filter) return c.json({ error: 'set not found' }, 404);
     return c.json(await setItems(c.env.DB, siteId, filter, limit, after ?? null), 200);
   },
@@ -987,10 +997,12 @@ app.openapi(
       c.header('WWW-Authenticate', 'Basic realm="feedsmith", charset="UTF-8"');
       return c.json({ error: 'unauthorized' }, 401);
     }
-    const set = await getSet(c.env.DB, siteId, slug);
-    const filter = set ? storedFilter(set) : null;
+    const site = await getSite(c.env.DB, siteId);
+    const set = site ? await getSet(c.env.DB, siteId, slug) : null;
+    const type = site ? catalogTypeOf(site.platform) : 'commerce';
+    const filter = set ? storedFilter(set, type) : null;
     if (!set || !filter) return c.json({ error: 'set not found' }, 404);
-    const { body, items } = await setCsv(c.env.DB, siteId, filter);
+    const { body, items } = await setCsv(c.env.DB, siteId, type, filter);
     return c.body(body, 200, { 'content-type': 'text/csv; charset=utf-8', 'cache-control': 'private, no-store', 'x-feed-items': String(items) });
   },
 );

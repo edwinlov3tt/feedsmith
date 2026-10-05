@@ -44,6 +44,60 @@ if (!header) throw new Error('empty file');
 const col = (name: string): number => header.indexOf(name);
 const get = (r: string[], name: string): string => r[col(name)] ?? '';
 
+if (col('vehicle_id') >= 0) {
+  validateVehicles();
+  process.exit(process.exitCode ?? 0);
+}
+
+/** Meta automotive inventory feed: required fields and enums (Auto Ads reference, Oct 2026). */
+function validateVehicles(): void {
+  if (!header) return;
+  const required = ['vehicle_id', 'title', 'description', 'url', 'make', 'model', 'year', 'mileage.value', 'mileage.unit', 'image[0].url', 'body_style', 'price', 'exterior_color', 'state_of_vehicle', 'address.addr1', 'address.city', 'address.region', 'address.country', 'latitude', 'longitude'];
+  const enums: Record<string, string[]> = {
+    body_style: ['CONVERTIBLE', 'COUPE', 'CROSSOVER', 'HATCHBACK', 'MINIVAN', 'TRUCK', 'SUV', 'SEDAN', 'VAN', 'WAGON', 'SMALL_CAR', 'OTHER'],
+    state_of_vehicle: ['New', 'Used', 'CPO'],
+    availability: ['available', 'not_available'],
+    'mileage.unit': ['MI', 'KM'],
+  };
+  const problems = new Map<string, number>();
+  const note = (p: string): void => {
+    problems.set(p, (problems.get(p) ?? 0) + 1);
+  };
+  const ids = new Set<string>();
+  const count = (name: string): Map<string, number> => {
+    const m = new Map<string, number>();
+    for (const r of data) m.set(get(r, name), (m.get(get(r, name)) ?? 0) + 1);
+    return m;
+  };
+  const prices: number[] = [];
+  for (const r of data) {
+    if (r.length !== header.length) note(`row has ${r.length} columns, expected ${header.length}`);
+    for (const f of required) if (!get(r, f)) note(`missing ${f}`);
+    for (const [f, allowed] of Object.entries(enums)) if (get(r, f) && !allowed.includes(get(r, f))) note(`invalid ${f} "${get(r, f)}"`);
+    if (ids.has(get(r, 'vehicle_id'))) note('duplicate vehicle_id');
+    ids.add(get(r, 'vehicle_id'));
+    if (get(r, 'vin') && !/^[A-HJ-NPR-Z0-9]{17}$/.test(get(r, 'vin'))) note('vin not 17 characters');
+    if (!/^\d{4}$/.test(get(r, 'year'))) note('year not yyyy');
+    if (get(r, 'state_of_vehicle') === 'New' && get(r, 'mileage.value') !== '0') note('new vehicle with mileage');
+    const m = /^(\d+\.\d{2}) [A-Z]{3}$/.exec(get(r, 'price'));
+    if (!m?.[1]) note('price not "0.00 USD" format');
+    else prices.push(Number(m[1]));
+    for (const f of ['url', 'image[0].url']) if (get(r, f) && !get(r, f).startsWith('https://')) note(`${f} not https`);
+  }
+  const top = (m: Map<string, number>, n: number): string =>
+    [...m.entries()].sort((a, b) => b[1] - a[1]).slice(0, n).map(([k, v]) => `${k || '(blank)'} ${v}`).join(', ');
+  prices.sort((a, b) => a - b);
+  console.log(`vehicles:       ${data.length}`);
+  console.log(`state:          ${top(count('state_of_vehicle'), 3)}`);
+  console.log(`availability:   ${top(count('availability'), 2)}`);
+  console.log(`body styles:    ${top(count('body_style'), 6)}`);
+  console.log(`makes:          ${top(count('make'), 6)}`);
+  console.log(`price range:    $${prices[0]?.toFixed(0)} - $${prices[prices.length - 1]?.toFixed(0)}, median $${prices[Math.floor(prices.length / 2)]?.toFixed(0)}`);
+  console.log(`dealer:         ${get(data[0] ?? [], 'dealer_name')}, ${get(data[0] ?? [], 'address.city')} ${get(data[0] ?? [], 'address.region')}`);
+  console.log(problems.size ? `PROBLEMS:\n${[...problems].map(([p, n]) => `  ${p}: ${n}`).join('\n')}` : 'problems:       none (all required Meta vehicle fields present and valid)');
+  process.exitCode = problems.size ? 1 : 0;
+}
+
 const REQUIRED = ['id', 'title', 'description', 'availability', 'condition', 'price', 'link', 'image_link'];
 const problems = new Map<string, number>();
 const note = (p: string): void => {

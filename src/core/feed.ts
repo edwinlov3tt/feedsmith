@@ -1,7 +1,7 @@
 // Meta catalog feed format. The same row feeds the CSV file, change detection
 // and the Batch API, so what Meta sees is exactly what is compared.
 
-import type { Availability, Money, Variant } from './model.ts';
+import type { Availability, CatalogType, Money, Variant } from './model.ts';
 
 // Order follows Meta's own catalog template (Commerce Manager > Add items >
 // Data feed > template, October 2026): its required columns first, then the
@@ -34,6 +34,49 @@ export const META_COLUMNS = [
 ] as const;
 export type MetaColumn = (typeof META_COLUMNS)[number];
 export type MetaRow = Record<MetaColumn, string>;
+
+// Meta automotive inventory feed (Auto Ads reference, Vehicle + Dealership
+// fields, October 2026): required columns first, in the reference's order.
+const VEHICLE_IMAGE_COLUMNS = Array.from({ length: 10 }, (_, i) => `image[${i}].url`);
+export const VEHICLE_COLUMNS = [
+  'vehicle_id',
+  'title',
+  'description',
+  'url',
+  'make',
+  'model',
+  'year',
+  'mileage.value',
+  'mileage.unit',
+  ...VEHICLE_IMAGE_COLUMNS,
+  'body_style',
+  'price',
+  'exterior_color',
+  'state_of_vehicle',
+  'address.addr1',
+  'address.city',
+  'address.region',
+  'address.postal_code',
+  'address.country',
+  'latitude',
+  'longitude',
+  'availability',
+  'vin',
+  'trim',
+  'transmission',
+  'drivetrain',
+  'fuel_type',
+  'interior_color',
+  'stock_number',
+  'dealer_name',
+  'dealer_phone',
+  'sale_price',
+  // Product set filter: vehicle price band.
+  'custom_label_0',
+];
+
+/** Any feed row, product or vehicle: column name to cell text. */
+export type FeedRow = Record<string, string>;
 
 function money(m: Money | null): string {
   return m ? `${m.amount} ${m.currency}` : '';
@@ -85,16 +128,89 @@ export function toMetaRow(v: Variant): MetaRow {
   };
 }
 
+/** Vehicle price bands for product sets. */
+export function vehiclePriceBand(amount: string): string {
+  const n = Number(amount);
+  if (n < 20_000) return 'Under $20k';
+  if (n < 35_000) return '$20k-$35k';
+  if (n < 50_000) return '$35k-$50k';
+  return '$50k+';
+}
+
+/** A vehicle in Meta's automotive feed columns. Throws if called on a product. */
+export function toVehicleRow(v: Variant): FeedRow {
+  const car = v.vehicle;
+  if (!car) throw new Error(`variant ${v.id} has no vehicle fields`);
+  const images = [v.imageLink, ...v.additionalImageLinks].filter((u): u is string => u !== null);
+  const row: FeedRow = {
+    vehicle_id: v.id,
+    title: v.title,
+    description: v.description,
+    url: v.link,
+    make: car.make,
+    model: car.model,
+    year: String(car.year),
+    'mileage.value': String(car.mileage),
+    'mileage.unit': car.mileageUnit,
+    body_style: car.bodyStyle,
+    price: money(v.price),
+    exterior_color: v.color ?? '',
+    state_of_vehicle: car.state,
+    'address.addr1': car.dealer.addr1,
+    'address.city': car.dealer.city,
+    'address.region': car.dealer.region,
+    'address.postal_code': car.dealer.postalCode ?? '',
+    'address.country': car.dealer.country,
+    latitude: String(car.dealer.latitude),
+    longitude: String(car.dealer.longitude),
+    // Meta vehicles use available / not_available.
+    availability: v.availability === 'in stock' || v.availability === 'preorder' || v.availability === 'available for order' ? 'available' : 'not_available',
+    vin: car.vin ?? '',
+    trim: car.trim ?? '',
+    transmission: car.transmission ?? '',
+    drivetrain: car.drivetrain ?? '',
+    fuel_type: car.fuelType ?? '',
+    interior_color: car.interiorColor ?? '',
+    stock_number: car.stockNumber ?? '',
+    dealer_name: car.dealer.name,
+    dealer_phone: car.dealer.phone ?? '',
+    sale_price: money(v.salePrice),
+    custom_label_0: vehiclePriceBand(v.salePrice?.amount ?? v.price.amount),
+  };
+  VEHICLE_IMAGE_COLUMNS.forEach((col, i) => {
+    row[col] = images[i] ?? '';
+  });
+  return row;
+}
+
+export function catalogTypeOfItem(v: Variant): CatalogType {
+  return v.vehicle ? 'vehicles' : 'commerce';
+}
+
+export function feedColumns(type: CatalogType): readonly string[] {
+  return type === 'vehicles' ? VEHICLE_COLUMNS : META_COLUMNS;
+}
+
+/** The item as a row of its catalog's feed. */
+export function toFeedRow(v: Variant): FeedRow {
+  return v.vehicle ? toVehicleRow(v) : toMetaRow(v);
+}
+
 /** Columns whose value differs between two variants, in feed terms. */
-export function changedColumns(before: Variant, after: Variant): MetaColumn[] {
-  const a = toMetaRow(before);
-  const b = toMetaRow(after);
-  return META_COLUMNS.filter((c) => a[c] !== b[c]);
+export function changedColumns(before: Variant, after: Variant): string[] {
+  const a = toFeedRow(before);
+  const b = toFeedRow(after);
+  const cols = new Set([...Object.keys(a), ...Object.keys(b)]);
+  return [...cols].filter((c) => a[c] !== b[c]);
 }
 
 /** Meta rejects items without these; such variants are left out of the feed. */
 export function feedProblem(v: Variant): string | null {
   if (!v.imageLink) return 'missing image';
+  if (v.vehicle) {
+    if (Number(v.price.amount) <= 0) return 'missing price';
+    return null;
+  }
   if (!v.brand && !v.gtin && !v.mpn) return 'missing brand';
   return null;
 }
@@ -106,10 +222,10 @@ function csvCell(value: string): string {
   return /[",\r\n]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
 }
 
-export function csvHeader(): string {
-  return `${META_COLUMNS.join(',')}\r\n`;
+export function csvHeader(type: CatalogType = 'commerce'): string {
+  return `${feedColumns(type).join(',')}\r\n`;
 }
 
-export function csvLine(row: MetaRow): string {
-  return `${META_COLUMNS.map((c) => csvCell(row[c])).join(',')}\r\n`;
+export function csvLine(row: FeedRow, type: CatalogType = 'commerce'): string {
+  return `${feedColumns(type).map((c) => csvCell(row[c] ?? '')).join(',')}\r\n`;
 }

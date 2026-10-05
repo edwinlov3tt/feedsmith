@@ -2,7 +2,8 @@
 // to the site's Meta catalog when one is connected.
 
 import { decryptSecret } from '../core/crypto.ts';
-import { csvHeader, csvLine, feedProblem, toMetaRow, type MetaRow } from '../core/feed.ts';
+import { csvHeader, csvLine, feedProblem, toFeedRow, type FeedRow } from '../core/feed.ts';
+import type { CatalogType } from '../core/model.ts';
 import { matchesSet, parseSetFilter, toMetaFilter, type SetFilter } from '../core/set-filter.ts';
 import type { Site } from '../core/site.ts';
 import { deleteProductSet, upsertProductSet, type MetaTarget, type SetSyncResult } from './meta.ts';
@@ -15,21 +16,24 @@ export interface SetDefinition {
 }
 
 /** Feed rows that would be published, in feed order. */
-async function* publishableRows(db: D1Database, siteId: string): AsyncGenerator<MetaRow> {
+async function* publishableRows(db: D1Database, siteId: string): AsyncGenerator<FeedRow> {
   for await (const page of allVariants(db, siteId)) {
-    for (const v of page) if (feedProblem(v) === null) yield toMetaRow(v);
+    for (const v of page) if (feedProblem(v) === null) yield toFeedRow(v);
   }
 }
 
+/** The row's item id, in either catalog's column naming. */
+const rowId = (row: FeedRow): string => row['id'] ?? row['vehicle_id'] ?? '';
+
 /** Parsed filter for a stored set; a corrupt stored filter matches nothing. */
-export function storedFilter(set: StoredSet): SetFilter | null {
-  const parsed = parseSetFilter(set.filter);
+export function storedFilter(set: StoredSet, type: CatalogType): SetFilter | null {
+  const parsed = parseSetFilter(set.filter, type);
   return parsed.ok ? parsed.filter : null;
 }
 
 /** Item counts for every set in one pass over the feed. */
-export async function countSets(db: D1Database, siteId: string, sets: readonly StoredSet[]): Promise<Map<string, number>> {
-  const filters = sets.map((s) => [s.slug, storedFilter(s)] as const);
+export async function countSets(db: D1Database, siteId: string, type: CatalogType, sets: readonly StoredSet[]): Promise<Map<string, number>> {
+  const filters = sets.map((s) => [s.slug, storedFilter(s, type)] as const);
   const counts = new Map(sets.map((s) => [s.slug, 0]));
   for await (const row of publishableRows(db, siteId)) {
     for (const [slug, f] of filters) if (f && matchesSet(f, row)) counts.set(slug, (counts.get(slug) ?? 0) + 1);
@@ -38,23 +42,26 @@ export async function countSets(db: D1Database, siteId: string, sets: readonly S
 }
 
 /** One page of a set's items, ordered by item id, starting after `after`. */
-export async function setItems(db: D1Database, siteId: string, filter: SetFilter, limit: number, after: string | null): Promise<{ items: MetaRow[]; next: string | null }> {
-  const items: MetaRow[] = [];
+export async function setItems(db: D1Database, siteId: string, filter: SetFilter, limit: number, after: string | null): Promise<{ items: FeedRow[]; next: string | null }> {
+  const items: FeedRow[] = [];
   for await (const row of publishableRows(db, siteId)) {
-    if (after !== null && row.id <= after) continue;
+    if (after !== null && rowId(row) <= after) continue;
     if (!matchesSet(filter, row)) continue;
-    if (items.length === limit) return { items, next: items[items.length - 1]?.id ?? null };
+    if (items.length === limit) {
+      const last = items[items.length - 1];
+      return { items, next: last ? rowId(last) : null };
+    }
     items.push(row);
   }
   return { items, next: null };
 }
 
-export async function setCsv(db: D1Database, siteId: string, filter: SetFilter): Promise<{ body: string; items: number }> {
-  const parts = [csvHeader()];
+export async function setCsv(db: D1Database, siteId: string, type: CatalogType, filter: SetFilter): Promise<{ body: string; items: number }> {
+  const parts = [csvHeader(type)];
   let items = 0;
   for await (const row of publishableRows(db, siteId)) {
     if (!matchesSet(filter, row)) continue;
-    parts.push(csvLine(row));
+    parts.push(csvLine(row, type));
     items++;
   }
   return { body: parts.join(''), items };
@@ -75,16 +82,18 @@ function slugify(s: string): string {
  * department, Women's, Kids and Clearance. Sets with no items are left out,
  * since Meta won't deliver ads from an empty set.
  */
-export async function defaultSetDefinitions(db: D1Database, siteId: string): Promise<SetDefinition[]> {
+export async function defaultSetDefinitions(db: D1Database, siteId: string, type: CatalogType): Promise<SetDefinition[]> {
+  if (type === 'vehicles') return defaultVehicleSets(db, siteId);
   const departments = new Map<string, number>();
   let women = 0;
   let kids = 0;
   let clearance = 0;
   for await (const row of publishableRows(db, siteId)) {
-    if (row.custom_label_0) departments.set(row.custom_label_0, (departments.get(row.custom_label_0) ?? 0) + 1);
-    if (row.gender === 'female') women++;
-    if (['kids', 'toddler', 'infant', 'newborn'].includes(row.age_group)) kids++;
-    if (row.custom_label_1 === 'clearance') clearance++;
+    const dept = row['custom_label_0'];
+    if (dept) departments.set(dept, (departments.get(dept) ?? 0) + 1);
+    if (row['gender'] === 'female') women++;
+    if (['kids', 'toddler', 'infant', 'newborn'].includes(row['age_group'] ?? '')) kids++;
+    if (row['custom_label_1'] === 'clearance') clearance++;
   }
   const defs: SetDefinition[] = [
     {
@@ -102,6 +111,35 @@ export async function defaultSetDefinitions(db: D1Database, siteId: string): Pro
   return defs;
 }
 
+/**
+ * Vehicle defaults: everything available, by condition (New / Used / CPO), and
+ * by the body styles that make up most dealer inventory. Empty sets are skipped.
+ */
+async function defaultVehicleSets(db: D1Database, siteId: string): Promise<SetDefinition[]> {
+  const count = new Map<string, number>();
+  const bump = (k: string): void => {
+    count.set(k, (count.get(k) ?? 0) + 1);
+  };
+  for await (const row of publishableRows(db, siteId)) {
+    if (row['availability'] !== 'available') continue;
+    bump(`state:${row['state_of_vehicle']}`);
+    bump(`body:${row['body_style']}`);
+  }
+  const available = { availability: { eq: 'available' } };
+  const candidates: Array<SetDefinition & { needs: string[] }> = [
+    { slug: 'all-available', name: 'All available vehicles', filter: available, needs: [] },
+    { slug: 'new', name: 'New vehicles', filter: { and: [available, { state_of_vehicle: { eq: 'New' } }] }, needs: ['state:New'] },
+    { slug: 'used', name: 'Used vehicles', filter: { and: [available, { state_of_vehicle: { is_any: ['Used', 'CPO'] } }] }, needs: ['state:Used', 'state:CPO'] },
+    { slug: 'cpo', name: 'Certified pre-owned', filter: { and: [available, { state_of_vehicle: { eq: 'CPO' } }] }, needs: ['state:CPO'] },
+    { slug: 'trucks', name: 'Trucks', filter: { and: [available, { body_style: { eq: 'TRUCK' } }] }, needs: ['body:TRUCK'] },
+    { slug: 'suvs', name: 'SUVs and crossovers', filter: { and: [available, { body_style: { is_any: ['SUV', 'CROSSOVER'] } }] }, needs: ['body:SUV', 'body:CROSSOVER'] },
+    { slug: 'cars', name: 'Cars', filter: { and: [available, { body_style: { is_any: ['SEDAN', 'COUPE', 'HATCHBACK', 'CONVERTIBLE', 'WAGON', 'SMALL_CAR'] } }] }, needs: ['body:SEDAN', 'body:COUPE', 'body:HATCHBACK', 'body:CONVERTIBLE', 'body:WAGON', 'body:SMALL_CAR'] },
+  ];
+  return candidates
+    .filter((c) => c.needs.length === 0 || c.needs.some((n) => (count.get(n) ?? 0) > 0))
+    .map(({ slug, name, filter }) => ({ slug, name, filter }));
+}
+
 export async function metaTargetFor(env: Env, site: Pick<Site, 'id' | 'metaCatalogId'>): Promise<MetaTarget | null> {
   if (!site.metaCatalogId) return null;
   const enc = await getMetaTokenEnc(env.DB, site.id);
@@ -112,8 +150,8 @@ export async function metaTargetFor(env: Env, site: Pick<Site, 'id' | 'metaCatal
 export type SyncOutcome = { slug: string; ok: true; result: SetSyncResult } | { slug: string; ok: false; error: string };
 
 /** Pushes one stored set to Meta and records the outcome on the set. */
-export async function syncSet(env: Env, siteId: string, target: MetaTarget, set: StoredSet): Promise<SyncOutcome> {
-  const filter = storedFilter(set);
+export async function syncSet(env: Env, siteId: string, type: CatalogType, target: MetaTarget, set: StoredSet): Promise<SyncOutcome> {
+  const filter = storedFilter(set, type);
   if (!filter) {
     await recordSetSync(env.DB, siteId, set.slug, null, 'stored filter is invalid');
     return { slug: set.slug, ok: false, error: 'stored filter is invalid' };

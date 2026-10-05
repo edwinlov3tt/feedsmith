@@ -1,6 +1,6 @@
 // Compares what the site shows now with what was stored, product by product.
 
-import { changedColumns, type MetaColumn } from './feed.ts';
+import { changedColumns } from './feed.ts';
 import type { Variant } from './model.ts';
 
 export type ChangeKind = 'created' | 'updated' | 'out_of_stock' | 'back_in_stock';
@@ -8,7 +8,8 @@ export type ChangeKind = 'created' | 'updated' | 'out_of_stock' | 'back_in_stock
 export interface Change {
   variantId: string;
   kind: ChangeKind;
-  fields: MetaColumn[];
+  /** Feed columns that changed (product or vehicle column names). */
+  fields: string[];
 }
 
 export interface ProductDiff {

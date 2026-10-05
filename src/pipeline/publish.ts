@@ -1,4 +1,5 @@
-import { csvHeader, csvLine, feedProblem, toMetaRow } from '../core/feed.ts';
+import { csvHeader, csvLine, feedProblem, toFeedRow } from '../core/feed.ts';
+import type { CatalogType } from '../core/model.ts';
 import { allVariants } from './store.ts';
 
 export const feedKey = (siteId: string): string => `feeds/${siteId}/meta.csv`;
@@ -10,8 +11,8 @@ export interface BuiltFeed {
 }
 
 /** The Meta CSV for a site from current variant state. */
-export async function buildFeed(db: D1Database, siteId: string): Promise<BuiltFeed> {
-  const parts: string[] = [csvHeader()];
+export async function buildFeed(db: D1Database, siteId: string, type: CatalogType): Promise<BuiltFeed> {
+  const parts: string[] = [csvHeader(type)];
   const skipped: Record<string, number> = {};
   let items = 0;
   for await (const page of allVariants(db, siteId)) {
@@ -21,7 +22,7 @@ export async function buildFeed(db: D1Database, siteId: string): Promise<BuiltFe
         skipped[problem] = (skipped[problem] ?? 0) + 1;
         continue;
       }
-      parts.push(csvLine(toMetaRow(v)));
+      parts.push(csvLine(toFeedRow(v), type));
       items++;
     }
   }

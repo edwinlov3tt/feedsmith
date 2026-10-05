@@ -14,7 +14,7 @@
 // still reaches finalize and the error gate decides.
 
 import { z } from 'zod';
-import { adapterFor } from '../adapters/registry.ts';
+import { adapterFor, catalogTypeOf } from '../adapters/registry.ts';
 import { decryptSecret } from '../core/crypto.ts';
 import { diffProduct } from '../core/diff.ts';
 import { HttpClient, mapLimit, siteHosts } from '../core/http.ts';
@@ -49,6 +49,7 @@ import {
   startCrawling,
   strikeUndiscovered,
   unpushed,
+  updateSiteBasics,
   upsertDiscovered,
   variantOwners,
   variantsForRef,
@@ -139,6 +140,10 @@ async function handleDiscover(env: Env, msg: Extract<CrawlMessage, { type: 'disc
   if (refs.length === 0) {
     await finishRun(env.DB, run.id, 'failed', 'discovery found no products', { warnings, pagesFetched: result.pagesFetched });
     return;
+  }
+  // Vehicles: keep the dealership current (it's on every item and Meta requires it).
+  if (result.dealer && JSON.stringify(result.dealer) !== JSON.stringify(site.config.dealer)) {
+    await updateSiteBasics(env.DB, site.id, site.name, { ...site.config, dealer: result.dealer });
   }
   await upsertDiscovered(env.DB, site.id, run.id, refs);
   await startCrawling(env.DB, run.id, refs.length, refs.length, {
@@ -322,7 +327,7 @@ async function handleFinalize(env: Env, msg: Extract<CrawlMessage, { type: 'fina
   // Last check before anything leaves: the feed itself must not collapse. This
   // catches what per-product checks can't, such as a config change that makes
   // most items unpublishable.
-  const feed = await buildFeed(env.DB, site.id);
+  const feed = await buildFeed(env.DB, site.id, catalogTypeOf(site.platform));
   const previous = await publishedItems(env.FEEDS, site.id);
   if (previous !== null && previous > 0 && feed.items < previous * site.config.minFeedRatio) {
     const reason = `feed would shrink from ${previous} to ${feed.items} items (${pct(feed.items / previous)} of the live feed, under ${pct(site.config.minFeedRatio)})`;

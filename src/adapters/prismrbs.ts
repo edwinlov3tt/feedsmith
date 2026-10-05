@@ -326,6 +326,7 @@ export function parseProductPage(html: string, ref: ProductRef, site: Site): Rea
       department: ref.department,
       clearance: ref.clearance,
       featured: ref.featured,
+      vehicle: null,
     };
   };
 
@@ -356,6 +357,7 @@ export function parseProductPage(html: string, ref: ProductRef, site: Site): Rea
 
 export const prismrbs: Adapter = {
   id: 'prismrbs',
+  catalogType: 'commerce',
 
   detect(html) {
     return /innerweb\/v\d/i.test(html) && /shop_product_list\.asp|shop_main\.asp/i.test(html);

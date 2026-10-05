@@ -83,6 +83,15 @@ creates carry `retailer_id = feedsmith:<slug>` so they are re-found rather than
 duplicated; when Meta reports an identical filter already exists (error 10803),
 the existing set is adopted and keeps its name.
 
+**7d. Catalog types (2026-10-05).** Adapters declare a catalog type:
+`commerce` or `vehicles`. Vehicles reuse the variant model with a `vehicle`
+block (VIN, make/model/year/trim, mileage, body style, condition, dealership)
+and get their own feed columns (Meta's automotive spec), Batch API item type
+(`VEHICLE`, with nested mileage and address), set fields (`state_of_vehicle`,
+`body_style`, numeric `year`) and default sets. Diffing, gates and publishing
+are shared. Vehicle sites default to looser gone/sold-out gates (30%), because
+a sold car's page 404s as part of a normal day.
+
 **8. Idempotent queue handling.** Outcomes are keyed (run, product) with
 INSERT OR IGNORE. The last reader claims finalize with a conditional UPDATE, and
 finalize itself is claimed by queue message ID, so a redelivery proceeds but a

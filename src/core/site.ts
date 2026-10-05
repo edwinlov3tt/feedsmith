@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { PLATFORMS } from './model.ts';
+import { DealerSchema, PLATFORMS } from './model.ts';
 
 // Per-site crawl settings. Stored as JSON on the site row and parsed with this
 // schema every time it is read, so a bad row fails loudly instead of crawling
@@ -30,6 +30,8 @@ const fields = {
   maxSoldOutRate: z.number().min(0).max(1),
   /** The new feed must keep at least this share of the last published feed's items. */
   minFeedRatio: z.number().min(0).max(1),
+  /** Vehicles: the dealership. Filled from the site at discovery; editable. */
+  dealer: DealerSchema.nullable(),
 };
 
 type ConfigValues = { [K in keyof typeof fields]: z.infer<(typeof fields)[K]> };
@@ -49,6 +51,7 @@ const DEFAULTS: ConfigValues = {
   maxGoneRate: 0.1,
   maxSoldOutRate: 0.25,
   minFeedRatio: 0.8,
+  dealer: null,
 };
 
 /** A partial update: only the keys sent. No defaults, so unsent settings are left alone. */
@@ -74,6 +77,7 @@ export const SiteConfigSchema = SiteConfigPatchSchema.transform(
     maxGoneRate: p.maxGoneRate ?? DEFAULTS.maxGoneRate,
     maxSoldOutRate: p.maxSoldOutRate ?? DEFAULTS.maxSoldOutRate,
     minFeedRatio: p.minFeedRatio ?? DEFAULTS.minFeedRatio,
+    dealer: p.dealer ?? DEFAULTS.dealer,
   }),
 );
 

@@ -41,7 +41,8 @@ docs are at `/docs`, and the OpenAPI contract is at `/openapi.json`.
 |---|---|
 | **Client** | The business you run feeds for. Holds one or more sites. |
 | **Site** | One storefront: base URL, platform, crawl settings, feed password, Meta connection. |
-| **Platform / adapter** | How a storefront is read. `prismrbs` (campus stores on PrismRBS) or `jsonld` (any store that publishes schema.org Product data: many Shopify, WooCommerce, BigCommerce and custom sites). Detected automatically. |
+| **Platform / adapter** | How a storefront is read. Detected automatically. `prismrbs` (campus stores on PrismRBS) and `jsonld` (any store that publishes schema.org Product data: many Shopify, WooCommerce, BigCommerce and custom sites) produce product catalogs. `dealeron` (car dealer sites on DealerOn) produces a **vehicles** catalog. |
+| **Catalog type** | `commerce` (Meta product catalog) or `vehicles` (Meta automotive inventory). It follows the platform, and sets the feed columns, the Batch API item type and the product-set fields. |
 | **Product / variant** | A product (one page) has variants: one per size/color, each with its own SKU. Each variant is one row in the feed (`id` = SKU, `item_group_id` = product). |
 | **Run** | One crawl. `full` finds every product, then reads each. `sweep` re-reads known products for price and stock. |
 | **Change** | A variant created, updated, sold out or back in stock. Changes are what get pushed to Meta. |

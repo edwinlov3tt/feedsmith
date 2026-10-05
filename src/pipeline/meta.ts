@@ -8,7 +8,7 @@
 // docs/followups.md.
 
 import { z } from 'zod';
-import { feedProblem, toMetaRow } from '../core/feed.ts';
+import { feedProblem, toMetaRow, toVehicleRow } from '../core/feed.ts';
 import { asRecord } from '../core/json.ts';
 import { truncate } from '../core/normalize.ts';
 import type { Variant } from '../core/model.ts';
@@ -30,7 +30,8 @@ const API_TITLE_MAX = 100; // the CSV allows 200; the Batch API caps title at 10
 const API_DESCRIPTION_MAX = 5000; // the CSV allows 9,999; the Batch API caps at 5,000
 const API_IMAGES_MAX = 21;
 
-export type BatchData = Record<string, string | Array<{ url: string }>>;
+export type BatchValue = string | number | Array<{ url: string }> | Record<string, string | number>;
+export type BatchData = Record<string, BatchValue>;
 
 /**
  * A product item for items_batch, per Meta's PRODUCT_ITEM field reference
@@ -58,9 +59,56 @@ export function batchItem(v: Variant): BatchData {
   return data;
 }
 
+/**
+ * A VEHICLE item for items_batch, in Meta's automotive field names. Nested
+ * fields (mileage, address) are objects, as in the API, where the CSV feed
+ * flattens them to mileage.value, address.city and so on.
+ */
+export function batchVehicle(v: Variant): BatchData {
+  const car = v.vehicle;
+  if (!car) throw new Error(`variant ${v.id} has no vehicle fields`);
+  const row = toVehicleRow(v);
+  const images = [v.imageLink, ...v.additionalImageLinks].filter((u): u is string => u !== null).slice(0, 20);
+  const data: BatchData = {
+    vehicle_id: v.id,
+    title: truncate(v.title, 500),
+    description: truncate(v.description, API_DESCRIPTION_MAX),
+    url: v.link,
+    make: car.make,
+    model: car.model,
+    year: car.year,
+    mileage: { value: car.mileage, unit: car.mileageUnit },
+    image: images.map((url) => ({ url })),
+    body_style: car.bodyStyle,
+    price: row['price'] ?? '',
+    exterior_color: v.color ?? 'Other',
+    state_of_vehicle: car.state,
+    address: {
+      addr1: car.dealer.addr1,
+      city: car.dealer.city,
+      region: car.dealer.region,
+      country: car.dealer.country,
+      ...(car.dealer.postalCode ? { postal_code: car.dealer.postalCode } : {}),
+    },
+    latitude: car.dealer.latitude,
+    longitude: car.dealer.longitude,
+    availability: row['availability'] ?? 'available',
+    dealer_name: car.dealer.name,
+  };
+  for (const k of ['vin', 'trim', 'transmission', 'drivetrain', 'fuel_type', 'interior_color', 'stock_number', 'dealer_phone', 'sale_price', 'custom_label_0'] as const) {
+    const value = row[k];
+    if (value) data[k] = value;
+  }
+  return data;
+}
+
+export function batchItemType(variants: readonly Variant[]): 'PRODUCT_ITEM' | 'VEHICLE' {
+  return variants.some((v) => v.vehicle) ? 'VEHICLE' : 'PRODUCT_ITEM';
+}
+
 export function batchRequests(variants: readonly Variant[]): Array<{ method: 'UPDATE'; data: BatchData }> {
   // Same exclusions as the feed, so Meta never gets an item the feed leaves out.
-  return variants.filter((v) => feedProblem(v) === null).map((v) => ({ method: 'UPDATE', data: batchItem(v) }));
+  return variants.filter((v) => feedProblem(v) === null).map((v) => ({ method: 'UPDATE', data: v.vehicle ? batchVehicle(v) : batchItem(v) }));
 }
 
 function graphUrl(target: MetaTarget, path: string): string {
@@ -98,7 +146,7 @@ export async function pushVariants(target: MetaTarget, variants: readonly Varian
     const res = await fetchImpl(graphUrl(target, '/items_batch'), {
       method: 'POST',
       headers: { authorization: `Bearer ${target.token}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ item_type: 'PRODUCT_ITEM', allow_upsert: true, requests: requests.slice(i, i + BATCH_SIZE) }),
+      body: JSON.stringify({ item_type: batchItemType(variants), allow_upsert: true, requests: requests.slice(i, i + BATCH_SIZE) }),
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
     const body: unknown = await res.json().catch(() => null);

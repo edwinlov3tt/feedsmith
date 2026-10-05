@@ -4,7 +4,8 @@
 // and evaluated locally against feed rows (for counts, item lists and per-set
 // feeds). Only fields Feedsmith writes and Meta can filter on are allowed.
 
-import type { MetaRow } from './feed.ts';
+import type { FeedRow } from './feed.ts';
+import type { CatalogType } from './model.ts';
 
 export const SET_FIELDS = [
   'availability',
@@ -22,7 +23,30 @@ export const SET_FIELDS = [
   'retailer_id',
   'price_amount',
 ] as const;
-export type SetField = (typeof SET_FIELDS)[number];
+
+/** Vehicle catalog fields Meta filters vehicle sets on. */
+export const VEHICLE_SET_FIELDS = [
+  'availability',
+  'make',
+  'model',
+  'year',
+  'trim',
+  'body_style',
+  'state_of_vehicle',
+  'exterior_color',
+  'fuel_type',
+  'drivetrain',
+  'transmission',
+  'custom_label_0',
+  'vehicle_id',
+] as const;
+
+export function setFieldsFor(type: CatalogType): readonly string[] {
+  return type === 'vehicles' ? VEHICLE_SET_FIELDS : SET_FIELDS;
+}
+
+/** Fields compared as numbers (lt/lte/gt/gte allowed). */
+const NUMERIC_FIELDS = new Set(['price_amount', 'year']);
 
 // Meta: "contains" operators are for free text; enum fields take eq/neq/is_any.
 const STRING_OPS = ['eq', 'neq', 'contains', 'not_contains', 'i_contains', 'i_not_contains', 'is_any', 'is_not_any'] as const;
@@ -32,7 +56,7 @@ type Op = (typeof STRING_OPS)[number] | (typeof NUMBER_OPS)[number];
 export type SetFilter =
   | { kind: 'all' }
   | { kind: 'and' | 'or'; items: SetFilter[] }
-  | { kind: 'rule'; field: SetField; op: Op; value: string | number | string[] };
+  | { kind: 'rule'; field: string; op: Op; value: string | number | string[] };
 
 const MAX_DEPTH = 4;
 const MAX_RULES = 50;
@@ -46,7 +70,8 @@ function isOneOf<T extends string>(list: readonly T[], v: string): v is T {
 }
 
 /** Parses Meta-format filter JSON. Returns an error message instead of throwing. */
-export function parseSetFilter(raw: unknown): { ok: true; filter: SetFilter } | { ok: false; error: string } {
+export function parseSetFilter(raw: unknown, type: CatalogType = 'commerce'): { ok: true; filter: SetFilter } | { ok: false; error: string } {
+  const allowed = setFieldsFor(type);
   let rules = 0;
   const walk = (node: unknown, depth: number, path: string): SetFilter => {
     if (depth > MAX_DEPTH) throw new Error(`${path}: nested deeper than ${MAX_DEPTH}`);
@@ -60,14 +85,15 @@ export function parseSetFilter(raw: unknown): { ok: true; filter: SetFilter } | 
       if (!Array.isArray(body) || body.length === 0) throw new Error(`${path}.${key}: expected a non-empty array`);
       return { kind: key, items: body.map((b, i) => walk(b, depth + 1, `${path}.${key}[${i}]`)) };
     }
-    if (!isOneOf(SET_FIELDS, key)) throw new Error(`${path}: unsupported field "${key}" (allowed: ${SET_FIELDS.join(', ')})`);
+    if (!allowed.includes(key)) throw new Error(`${path}: unsupported field "${key}" (allowed: ${allowed.join(', ')})`);
     if (!isRecord(body) || Object.keys(body).length !== 1) throw new Error(`${path}.${key}: expected one operator, e.g. {"eq": "value"}`);
     const op = Object.keys(body)[0] ?? '';
     const value = body[op];
     if (++rules > MAX_RULES) throw new Error(`more than ${MAX_RULES} rules`);
-    if (key === 'price_amount') {
+    if (NUMERIC_FIELDS.has(key)) {
       if (!isOneOf(NUMBER_OPS, op) || typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
-        throw new Error(`${path}.price_amount: use lt/lte/gt/gte/eq/neq with whole cents, e.g. {"lt": 2500}`);
+        const example = key === 'year' ? '{"gte": 2020}' : 'whole cents, e.g. {"lt": 2500}';
+        throw new Error(`${path}.${key}: use lt/lte/gt/gte/eq/neq with ${example}`);
       }
       return { kind: 'rule', field: key, op, value };
     }
@@ -105,21 +131,23 @@ export function toMetaFilter(f: SetFilter): Record<string, unknown> {
   }
 }
 
-function fieldValue(row: MetaRow, field: SetField): string | number {
+function fieldValue(row: FeedRow, field: string): string | number {
   switch (field) {
     case 'retailer_id':
-      return row.id;
+      return row['id'] ?? '';
     case 'price_amount': {
-      const amount = Number(row.price.split(' ')[0]);
+      const amount = Number((row['price'] ?? '').split(' ')[0]);
       return Number.isFinite(amount) ? Math.round(amount * 100) : 0;
     }
+    case 'year':
+      return Number(row['year'] ?? 0);
     default:
-      return row[field];
+      return row[field] ?? '';
   }
 }
 
 /** Local evaluation, case-insensitive like Meta's operators. */
-export function matchesSet(f: SetFilter, row: MetaRow): boolean {
+export function matchesSet(f: SetFilter, row: FeedRow): boolean {
   switch (f.kind) {
     case 'all':
       return true;

@@ -274,6 +274,7 @@ export function variantsFromJsonLd(nodes: JsonRecord[], ref: ProductRef, site: S
           department: ref.department,
           clearance: ref.clearance,
           featured: ref.featured,
+          vehicle: null,
         });
       }
     }
@@ -319,6 +320,7 @@ async function collectSitemapUrls(ctx: AdapterContext, warnings: string[]): Prom
 
 export const jsonld: Adapter = {
   id: 'jsonld',
+  catalogType: 'commerce',
 
   detect(html) {
     return productNodes(html).length > 0 || /"@type"\s*:\s*"(Product|ProductGroup|Organization|WebSite)"/.test(html);

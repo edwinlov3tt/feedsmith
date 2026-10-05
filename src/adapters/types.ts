@@ -1,5 +1,5 @@
 import type { HttpClient } from '../core/http.ts';
-import type { DiscoverResult, PlatformId, ProductRef, ReadResult } from '../core/model.ts';
+import type { CatalogType, DiscoverResult, PlatformId, ProductRef, ReadResult } from '../core/model.ts';
 import type { Site } from '../core/site.ts';
 
 export interface AdapterContext {
@@ -13,6 +13,8 @@ export interface AdapterContext {
  */
 export interface Adapter {
   readonly id: PlatformId;
+  /** The Meta catalog vertical this platform's items belong to. */
+  readonly catalogType: CatalogType;
   /** True when a fetched homepage looks like this platform. */
   detect(html: string): boolean;
   /** Finds every product on the site. */
