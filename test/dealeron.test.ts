@@ -35,6 +35,16 @@ describe('dealeron discovery', () => {
     });
   });
 
+  it('bounds every dealer field a hostile or odd page supplies', () => {
+    const ld = { '@type': 'AutoDealer', name: 'D'.repeat(500), telephone: '1'.repeat(300), address: { streetAddress: 'S'.repeat(5000), addressLocality: 'C'.repeat(500), addressRegion: 'R'.repeat(500), postalCode: 'P'.repeat(300), addressCountry: 'X'.repeat(500) }, geo: { latitude: 46.8, longitude: -92.1 } };
+    const d = parseDealer(`<script type="application/ld+json">${JSON.stringify(ld)}</script>`);
+    expect(d).not.toBeNull();
+    expect([d?.name.length, d?.phone?.length, d?.addr1.length, d?.city.length, d?.postalCode?.length, d?.country.length]).toEqual([100, 40, 200, 100, 20, 100]);
+    // Out-of-range coordinates are not a dealer.
+    const bad = { ...ld, geo: { latitude: 999, longitude: 0 } };
+    expect(parseDealer(`<script type="application/ld+json">${JSON.stringify(bad)}</script>`)).toBeNull();
+  });
+
   it('reads vehicle URLs and VINs from an inventory page', () => {
     const refs = parseInventoryPage(fixture('dealeron-srp-used.html'), BASE, 'Used');
     expect(refs).toHaveLength(24);

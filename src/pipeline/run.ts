@@ -18,7 +18,7 @@ import { adapterFor, catalogTypeOf } from '../adapters/registry.ts';
 import { decryptSecret } from '../core/crypto.ts';
 import { diffProduct } from '../core/diff.ts';
 import { HttpClient, mapLimit, siteHosts } from '../core/http.ts';
-import { ProductRefSchema, VariantSchema, type ProductRef, type Variant } from '../core/model.ts';
+import { DealerSchema, ProductRefSchema, VariantSchema, type ProductRef, type Variant } from '../core/model.ts';
 import type { Site } from '../core/site.ts';
 import { pushVariants } from './meta.ts';
 import { buildFeed, publishedItems, writeFeed } from './publish.ts';
@@ -142,8 +142,12 @@ async function handleDiscover(env: Env, msg: Extract<CrawlMessage, { type: 'disc
     return;
   }
   // Vehicles: keep the dealership current (it's on every item and Meta requires it).
-  if (result.dealer && JSON.stringify(result.dealer) !== JSON.stringify(site.config.dealer)) {
-    await updateSiteBasics(env.DB, site.id, site.name, { ...site.config, dealer: result.dealer });
+  // The dealer comes from the dealer's own page: validate before it is written
+  // into the site config, which every later read parses strictly.
+  const dealer = result.dealer ? DealerSchema.safeParse(result.dealer) : null;
+  if (dealer && !dealer.success) warnings.push('dealership details on the site are invalid; kept the previous ones');
+  if (dealer?.success && JSON.stringify(dealer.data) !== JSON.stringify(site.config.dealer)) {
+    await updateSiteBasics(env.DB, site.id, site.name, { ...site.config, dealer: dealer.data });
   }
   await upsertDiscovered(env.DB, site.id, run.id, refs);
   await startCrawling(env.DB, run.id, refs.length, refs.length, {

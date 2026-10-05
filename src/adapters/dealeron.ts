@@ -18,6 +18,7 @@ import { absoluteUrl, decodeEntities, htmlToText, jsonLdBlocks } from '../core/h
 import { asArray, asRecord, field, hasType, type JsonRecord } from '../core/json.ts';
 import {
   BODY_STYLES,
+  DealerSchema,
   type Dealer,
   type DiscoverResult,
   type ProductRef,
@@ -68,17 +69,21 @@ export function parseDealer(html: string): Dealer | null {
     const latitude = Number(field(geo, 'latitude'));
     const longitude = Number(field(geo, 'longitude'));
     if (!name || !addr1 || !city || !region || !Number.isFinite(latitude) || !Number.isFinite(longitude)) continue;
-    return {
-      name: decodeEntities(name).slice(0, 100),
-      phone: field(node, 'telephone'),
-      addr1,
-      city,
-      region,
-      postalCode: field(addr, 'postalCode'),
-      country: field(addr, 'addressCountry') ?? 'US',
+    // Site-supplied text: bound every field to the schema's limits, then
+    // validate, so nothing a dealer page says can produce an invalid config.
+    const cut = (v: string | null, max: number): string | null => (v === null ? null : decodeEntities(v).trim().slice(0, max) || null);
+    const parsed = DealerSchema.safeParse({
+      name: cut(name, 100),
+      phone: cut(field(node, 'telephone'), 40),
+      addr1: cut(addr1, 200),
+      city: cut(city, 100),
+      region: cut(region, 100),
+      postalCode: cut(field(addr, 'postalCode'), 20),
+      country: cut(field(addr, 'addressCountry'), 100) ?? 'US',
       latitude: Number(latitude.toFixed(6)),
       longitude: Number(longitude.toFixed(6)),
-    };
+    });
+    if (parsed.success) return parsed.data;
   }
   return null;
 }

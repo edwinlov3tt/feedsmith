@@ -75,6 +75,25 @@ function feedRows(): Array<Record<string, string>> {
 }
 
 describe('vehicles pipeline', () => {
+  it('never saves invalid dealer details into the site config', async () => {
+    // Bypass the adapter's own bounds: discovery hands the pipeline an invalid dealer.
+    const { dealeron } = await import('../src/adapters/dealeron.ts');
+    const real = dealeron.discover.bind(dealeron);
+    const spy = vi.spyOn(dealeron, 'discover').mockImplementation(async (ctx) => ({ ...(await real(ctx)), dealer: { name: 'x', phone: '9'.repeat(500), addr1: 'a', city: 'c', region: 'r', postalCode: null, country: 'US', latitude: 1, longitude: 1 } }));
+    try {
+      const run = await startRun(env, 'northstar-ford', 'full');
+      expect(run.kind).toBe('started');
+      await drain();
+      // The site still loads (config parses) and the bad dealer wasn't stored.
+      const site = await getSite(db as unknown as D1Database, 'northstar-ford');
+      expect(site?.config.dealer).toBeNull();
+      const notes = JSON.parse(String(db.rows('SELECT notes_json FROM runs ORDER BY started_at DESC LIMIT 1')[0]?.['notes_json'] ?? '{}'));
+      expect(notes.warnings).toContain('dealership details on the site are invalid; kept the previous ones');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('crawls a dealer, publishes an automotive feed, and handles a sold car', async () => {
     const run = await startRun(env, 'northstar-ford', 'full');
     expect(run.kind).toBe('started');
