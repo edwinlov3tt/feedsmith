@@ -1,0 +1,8 @@
+# Gitleaks config: the default rules, plus one allowlist.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Vehicle VINs (17 characters, no I/O/Q) are public identifiers printed on the car, not secrets"
+regexTarget = "secret"
+regexes = ['''^[A-HJ-NPR-Z0-9]{17}$''']
