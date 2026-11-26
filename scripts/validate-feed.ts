@@ -1,5 +1,6 @@
-// Checks a Meta catalog CSV against Meta's required-field rules and prints a
-// summary. Usage: node scripts/validate-feed.ts path/to/meta.csv
+// Checks a catalog CSV against the platform's required-field rules and prints
+// a summary: Meta products, Meta vehicles, or TikTok (told apart by the ID
+// column). Usage: node scripts/validate-feed.ts path/to/meta.csv
 
 import { readFileSync } from 'node:fs';
 import { AVAILABILITIES } from '../src/core/model.ts';
@@ -48,6 +49,10 @@ if (col('vehicle_id') >= 0) {
   validateVehicles();
   process.exit(process.exitCode ?? 0);
 }
+if (col('sku_id') >= 0) {
+  validateTikTok();
+  process.exit(process.exitCode ?? 0);
+}
 
 /** Meta automotive inventory feed: required fields and enums (Auto Ads reference, Oct 2026). */
 function validateVehicles(): void {
@@ -81,6 +86,7 @@ function validateVehicles(): void {
     if (get(r, 'state_of_vehicle') === 'New' && get(r, 'mileage.value') !== '0') note('new vehicle with mileage');
     const m = /^(\d+\.\d{2}) [A-Z]{3}$/.exec(get(r, 'price'));
     if (!m?.[1]) note('price not "0.00 USD" format');
+    else if (Number(m[1]) <= 0) note('price is zero');
     else prices.push(Number(m[1]));
     for (const f of ['url', 'image[0].url']) if (get(r, f) && !get(r, f).startsWith('https://')) note(`${f} not https`);
   }
@@ -95,6 +101,56 @@ function validateVehicles(): void {
   console.log(`price range:    $${prices[0]?.toFixed(0)} - $${prices[prices.length - 1]?.toFixed(0)}, median $${prices[Math.floor(prices.length / 2)]?.toFixed(0)}`);
   console.log(`dealer:         ${get(data[0] ?? [], 'dealer_name')}, ${get(data[0] ?? [], 'address.city')} ${get(data[0] ?? [], 'address.region')}`);
   console.log(problems.size ? `PROBLEMS:\n${[...problems].map(([p, n]) => `  ${p}: ${n}`).join('\n')}` : 'problems:       none (all required Meta vehicle fields present and valid)');
+  process.exitCode = problems.size ? 1 : 0;
+}
+
+/** TikTok catalog: required fields and accepted values (Catalog Product Parameters, Oct 2026). */
+function validateTikTok(): void {
+  if (!header) return;
+  const required = ['sku_id', 'title', 'description', 'availability', 'condition', 'price', 'link', 'image_link', 'brand'];
+  const enums: Record<string, string[]> = {
+    availability: ['in stock', 'available for order', 'preorder', 'out of stock', 'discontinued'],
+    condition: ['new', 'refurbished', 'used'],
+    age_group: ['newborn', 'infant', 'toddler', 'kids', 'adult'],
+    gender: ['male', 'female', 'unisex'],
+  };
+  const problems = new Map<string, number>();
+  const note = (p: string): void => {
+    problems.set(p, (problems.get(p) ?? 0) + 1);
+  };
+  const jpgOrPng = (u: string): boolean => /\.(jpe?g|png)$/i.test(new URL(u).pathname);
+  const ids = new Set<string>();
+  const labels = new Map<string, number>();
+  let withCategory = 0;
+  for (const r of data) {
+    if (r.length !== header.length) note(`row has ${r.length} columns, expected ${header.length}`);
+    for (const f of required) if (!get(r, f)) note(`missing ${f}`);
+    for (const [f, allowed] of Object.entries(enums)) if (get(r, f) && !allowed.includes(get(r, f))) note(`invalid ${f} "${get(r, f)}"`);
+    if (ids.has(get(r, 'sku_id'))) note('duplicate sku_id');
+    ids.add(get(r, 'sku_id'));
+    const m = /^(\d+\.\d{2}) [A-Z]{3}$/.exec(get(r, 'price'));
+    if (!m?.[1]) note('price not "0.00 USD" format');
+    else if (Number(m[1]) <= 0) note('price is zero');
+    if (get(r, 'image_link') && !jpgOrPng(get(r, 'image_link'))) note('image_link not JPG or PNG');
+    const extra = get(r, 'additional_image_link').split(',').filter(Boolean);
+    if (extra.length > 10) note('more than 10 additional images');
+    if (extra.some((u) => !jpgOrPng(u))) note('additional image not JPG or PNG');
+    if (get(r, 'title').length > 500) note('title over 500 chars');
+    if (get(r, 'description').length > 10000) note('description over 10,000 chars');
+    if (/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(get(r, 'description'))) note('description has control or invisible characters');
+    if (/\p{Extended_Pictographic}/u.test(get(r, 'description'))) note('description has emoji or symbols such as TM or R');
+    if (/<br(?![a-z])/i.test(get(r, 'description'))) note('description has stray <br');
+    const category = get(r, 'google_product_category');
+    if (category) withCategory++;
+    if (category.split(' > ').length > 3) note('google_product_category deeper than 3 levels');
+    const l = get(r, 'custom_label_4') || '(none)';
+    labels.set(l, (labels.get(l) ?? 0) + 1);
+  }
+  const top = [...labels.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([k, v]) => `${k} ${v}`).join(', ');
+  console.log(`items:          ${data.length}`);
+  console.log(`with category:  ${withCategory}`);
+  console.log(`clothing types: ${top}`);
+  console.log(problems.size ? `PROBLEMS:\n${[...problems].map(([p, n]) => `  ${p}: ${n}`).join('\n')}` : 'problems:       none (all required TikTok fields present and valid)');
   process.exitCode = problems.size ? 1 : 0;
 }
 
@@ -125,6 +181,7 @@ for (const r of data) {
   availability.set(a, (availability.get(a) ?? 0) + 1);
   const m = /^(\d+\.\d{2}) ([A-Z]{3})$/.exec(get(r, 'price'));
   if (!m?.[1]) note('price not "0.00 USD" format');
+  else if (Number(m[1]) <= 0) note('price is zero');
   else prices.push(Number(m[1]));
   for (const f of ['link', 'image_link']) if (get(r, f) && !get(r, f).startsWith('https://')) note(`${f} not https`);
   if (get(r, 'title').length > 200) note('title over 200 chars');

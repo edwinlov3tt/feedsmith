@@ -104,6 +104,8 @@ describe('vehicles pipeline', () => {
     expect(site?.config.dealer).toMatchObject({ name: 'NorthStar Ford MN', city: 'Duluth', region: 'MN' });
 
     const feed = r2.objects.get('feeds/northstar-ford/meta.csv') ?? '';
+    // TikTok takes vehicles in another format; no file is written.
+    expect(r2.objects.has('feeds/northstar-ford/tiktok.csv')).toBe(false);
     expect(feed.startsWith('vehicle_id,title,description,url,make,model,year,mileage.value,mileage.unit')).toBe(true);
     expect(feedRows().map((r) => r['vehicle_id']).sort()).toEqual([NEW_VIN, USED_VIN].sort());
     expect(feed).toContain(',available,');

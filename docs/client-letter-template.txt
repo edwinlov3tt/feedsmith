@@ -1,0 +1,91 @@
+==================== INTERNAL NOTES: DELETE THIS BLOCK BEFORE SENDING ====================
+
+- Replace every [BRACKETED] field. Delete any section marked OPTIONAL that doesn't apply, along with its label.
+- Never put the feed password in this email. Enter it in Commerce Manager yourself, or send it separately (phone call or a separate message).
+- Paragraphs aren't hard-wrapped on purpose, so they reflow cleanly when pasted into an email.
+- Written for store (product) catalogs. For a dealer (vehicle) catalog, change "products" to "vehicles" and drop the lines about sizes and colors.
+- Schedule behind the wording: full refresh nightly at 07:15 UTC (1:15 AM Mountain, 2:15 AM Central, 3:15 AM Eastern in daylight time; an hour earlier in standard time), and a price and stock re-check every 2 hours.
+- Promise only what's true. There's no automatic alert when an update is held back. If you tell the client you're watching it, check the site's runs (GET /admin/sites/[site-id]/runs).
+- Accurate as of 2026-10-21. If the setup changes, update this template (it lives in the feedsmith repo at docs/client-letter-template.txt).
+
+==========================================================================================
+
+
+Subject: Your Meta product catalog: how it works and what to expect
+
+Hi [CLIENT CONTACT NAME],
+
+We're setting up a product catalog for [STORE NAME] in Meta, so your products can appear in shopping and dynamic product ads on Facebook and Instagram. Your website platform doesn't provide a catalog file that Meta can use, so we use a service that builds the catalog from your website and keeps it up to date automatically. Here's how it works, how it's kept secure, and what you'll see on your end.
+
+
+NOTHING CHANGES ON YOUR WEBSITE
+
+There's nothing to install, and there's no login to share. We don't need access to your store's admin, orders or customer records. Your site keeps running exactly as it does today.
+
+
+HOW IT WORKS
+
+- Our service reads the public product pages of [STORE URL], the same pages any shopper sees: names, descriptions, photos, prices, sizes, colors, and whether each one is in stock.
+
+- Each size and color becomes its own item in the catalog, grouped under its product, so ads only show what's actually available. Item IDs match your store's own SKUs.
+
+- A full refresh runs overnight, and prices and stock are re-checked every 2 hours. New products are added on the nightly refresh. Price and stock changes typically reach Meta within a few hours.
+
+- It reads your site gently, a couple of pages at a time, and identifies itself as "FeedsmithBot". It doesn't run your site's scripts, so it won't show up as visitors in Google Analytics or set off your Meta pixel.
+
+
+HOW IT'S KEPT SECURE
+
+- It reads only public information. We never see or store customer details, orders, passwords or payment information, because the service never logs in to your store.
+
+- The catalog file Meta pulls from is password-protected, and it's only ever sent over encrypted (HTTPS) connections. Each store has its own unique password.
+
+- [OPTIONAL, if using the Catalog API] For faster updates, we also connect through Meta's official Catalog API, using an access key that can only manage your catalog. It's stored encrypted and is never displayed. You can revoke it at any time in your Meta Business Settings.
+
+- The service runs on Cloudflare's infrastructure, and only our team can manage it.
+
+
+SAFEGUARDS FOR YOUR CATALOG
+
+- Nothing gets deleted. When an item sells out, it's marked "out of stock": it stops showing in ads, keeps its history, and comes back automatically when it's restocked.
+
+- A bad reading never replaces your catalog. If your site is down or mid-update, or a result looks wrong (for example, a large share of products suddenly missing), that update is held back. The last good version stays live until a clean update comes through.
+
+- Some items are left out until they're fixed on your website: ones Meta would reject, or ones that would make a poor ad, such as a product with no photo or a $0.00 price.
+
+
+WHAT YOU'LL SEE IN COMMERCE MANAGER
+
+- Under Catalog, then Data sources: a data feed named "[FEED NAME]", which Meta fetches [DAILY / HOURLY]. It shows when it last ran, how many items it received, and any issues Meta found.
+
+- [OPTIONAL, if using the Catalog API] Between those scheduled fetches, you may also see items updated through the Catalog API. Those are the faster price and stock updates.
+
+- Under Catalog, then Items: your products, with each size and color listed as its own item. Meta counts these as products and variants (yours will show about [X] products and [Y] variants).
+
+- Brands: when a product's name doesn't include a brand, the item is listed under "[STORE NAME]" as its brand.
+
+- Product sets we've created for ad targeting, such as [All in stock, Women's, Kids, Apparel, Gifts + Home]. Each set updates automatically as products come and go.
+
+- Sold-out sizes shown as "out of stock" rather than removed.
+
+- Meta's own issues and recommendations, such as suggestions about image sizes. Many are optional. We review them and will let you know if anything needs your attention.
+
+
+WHAT WE NEED FROM YOU
+
+- [Access to your Meta Business account, or partner access to the catalog, so we can connect the feed. / Nothing for now: we're setting the catalog up in our business account.]
+
+- A heads-up about anything you don't want advertised (for example gift cards, textbooks or specific categories). We'll leave it out.
+
+- [OPTIONAL, pixel tag] To show shoppers the exact items they viewed, your Meta pixel needs to report product views and add-to-carts using these same item IDs. We can add a small tag for this through your Google Tag Manager. It uses your existing pixel, and the data goes to your Meta account, not to us.
+
+- Advance notice of major website changes, such as a redesign or a move to a new platform, so we can make sure the catalog keeps updating.
+
+If anything in the catalog doesn't match your website, or you have any questions, just reply to this email.
+
+Thanks,
+
+[YOUR NAME]
+[TITLE]
+[AGENCY NAME]
+[PHONE / EMAIL]

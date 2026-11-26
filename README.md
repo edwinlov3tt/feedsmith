@@ -13,6 +13,9 @@ current in three ways:
 - **Product sets**, defined once in Feedsmith, created and kept in sync in
   Meta, and also available as their own item lists and feeds.
 
+The same items are also published as a **TikTok catalog feed**, in TikTok's
+columns, for TikTok Catalog Manager.
+
 It runs on Cloudflare (Workers, D1, R2, Queues, Cron) and handles many clients
 from one deployment.
 
@@ -135,7 +138,11 @@ api -X POST $FEEDSMITH/admin/sites -d '{
   `"jsonld"` to force it.
 - **`defaultBrand`** is used when a title names no brand. Meta requires a brand,
   so set this to the store's name.
-- **`brandKeywords`** are brand names to pick out of product titles.
+- **`brandKeywords`** are brand names to pick out of product titles. The first
+  one found anywhere in a title wins, so put a name that can appear inside
+  another product's title (Apple in "Alexis Drake Apple Watch Band") after
+  the more specific one. Many PrismRBS stores prefix titles with "Brand®",
+  which is the quickest place to collect the list after a first crawl.
 
 ```sh
 api -X POST $FEEDSMITH/admin/sites/supe-store/preview -d '{
@@ -154,6 +161,7 @@ Optional `config` settings:
 | `includeUrlPatterns`, `excludeUrlPatterns` | Limit which sitemap URLs are read (generic sites). |
 | `crawlConcurrency` | Requests in parallel. Default 2; keep it low. |
 | `maxErrorRate`, `minDiscoveryRatio`, `maxGoneRate`, `maxSoldOutRate`, `minFeedRatio` | Publish gate thresholds. |
+| `mirrorImages` | Copy product images to our host for the TikTok file. Default off; check the store's robots.txt first. |
 
 ### 3. First full crawl
 
@@ -169,11 +177,17 @@ store takes about 15–18 minutes. Download and check the feed:
 ```sh
 curl -u supe-store:<feed-password> $FEEDSMITH/feeds/supe-store/meta.csv -o feed.csv
 node scripts/validate-feed.ts feed.csv   # checks Meta's required fields and formats
+curl -u supe-store:<feed-password> $FEEDSMITH/feeds/supe-store/tiktok.csv -o tiktok.csv
+node scripts/validate-feed.ts tiktok.csv # the same, against TikTok's rules
 ```
 
 From here the schedule takes over: a full crawl nightly and a sweep every 2 hours.
 
 ### 4. Connect the feed URL in Commerce Manager
+
+To explain the setup to the client (what it reads, how it's secured, what
+they'll see in Commerce Manager), send the plain-text email in
+[docs/client-letter-template.txt](docs/client-letter-template.txt).
 
 In the client's catalog, go to **Data sources**, then **Add items**, then
 **Data feed**, then **Use a URL or Google Sheets**.
@@ -188,6 +202,26 @@ In the client's catalog, go to **Data sources**, then **Add items**, then
 
 The first fetch should report the same item count as the run's feed. Copy the
 **catalog ID** from Catalog, then Settings.
+
+**TikTok:** in TikTok Catalog Manager, add products by **Data feed** with
+`https://feedsmith.edwin-6f1.workers.dev/feeds/<site-id>/tiktok.csv` and the same
+username and password. It has the Meta feed's items, less those whose only
+images aren't JPG or PNG (TikTok takes no other format). TikTok product sets
+are built in Catalog Manager; see [docs/product-sets.md](docs/product-sets.md#tiktok).
+Product catalogs only: vehicle sites get no TikTok file.
+
+Descriptions in this file are cleaned of what TikTok refuses: line breaks become
+spaces, and invisible characters, emoji, ™, ® and stray `<br` are removed.
+
+**Hosting images ourselves:** PrismRBS stores refuse HTTPS from outside the US,
+which is where TikTok fetches images from. With the `mirrorImages` setting on,
+each published run queues up to 1,000 images to copy to R2, and the next run's
+TikTok file links to the copies at `/images/<site-id>/<hash>.jpg`. Images not
+copied yet keep the store's link. Once an image is checked, an item whose images
+are all broken or under 500x500 is left out of the TikTok file, under
+`feed.tiktok.skipped`. The Meta feed keeps the store's links. Progress:
+`GET /admin/sites/<site-id>/images`. This doesn't help product pages, which stay
+on the store: see [docs/followups.md](docs/followups.md).
 
 ### 5. Connect live updates (Batch API)
 
@@ -301,13 +335,15 @@ Fields you can filter on:
 | `availability` | in stock, out of stock |
 | `brand` | |
 | `product_type` | the store's category, e.g. T-Shirts |
+| `google_product_category` | Google taxonomy path for clothing, e.g. Apparel & Accessories > Clothing > Shirts & Tops; blank otherwise. In the feed, not a Feedsmith set field |
 | `gender` | female, male, unisex |
 | `age_group` | adult, kids, toddler, infant, newborn |
 | `color`, `size`, `condition` | |
 | `custom_label_0` | department |
 | `custom_label_1` | `clearance` |
 | `custom_label_2` | price band: Under $25, $25-$50, $50-$100, $100+ |
-| `custom_label_3` | `featured` |
+| `custom_label_3` | store promotions: `featured`, `new`, or `featured new`; filter with `i_contains` |
+| `custom_label_4` | clothing type: T-Shirts, Sweatshirts & Hoodies, Hats, Polos, Shorts and so on; blank when not clothing |
 | `retailer_id` | SKU |
 | `price_amount` | price in cents |
 
@@ -415,11 +451,11 @@ HTTP Basic with the site ID and feed password. Full reference: `/docs`.
 | Area | Routes |
 |---|---|
 | Clients | `POST/GET /admin/clients`, `GET/PATCH /admin/clients/{id}`, `PUT /admin/sites/{id}/client` |
-| Sites | `POST/GET /admin/sites`, `GET/PATCH /admin/sites/{id}`, `POST /admin/sites/{id}/preview`, `POST /admin/sites/{id}/feed-password` |
+| Sites | `POST/GET /admin/sites`, `GET/PATCH /admin/sites/{id}`, `POST /admin/sites/{id}/preview`, `POST /admin/sites/{id}/feed-password`, `GET /admin/sites/{id}/images` |
 | Runs | `POST/GET /admin/sites/{id}/runs`, `GET /admin/runs/{id}`, `GET /admin/sites/{id}/changes` |
 | Meta | `PUT/DELETE /admin/sites/{id}/meta`, `GET /admin/runs/{id}/meta-status` |
 | Product sets | `GET /admin/sites/{id}/product-sets`, `PUT/DELETE …/product-sets/{slug}`, `POST …/product-sets/defaults`, `POST …/product-sets/sync`, `GET …/product-sets/{slug}/items` |
-| Feeds | `GET /feeds/{site}/meta.csv`, `GET /feeds/{site}/sets/{slug}/meta.csv` |
+| Feeds | `GET /feeds/{site}/meta.csv`, `GET /feeds/{site}/tiktok.csv`, `GET /feeds/{site}/sets/{slug}/meta.csv`, `GET /images/{site}/{file}` (public) |
 
 ---
 
@@ -469,7 +505,7 @@ Re-run `pnpm exec wrangler types` after changing bindings in `wrangler.jsonc`.
 ```
 src/
   adapters/    platform readers: prismrbs.ts, jsonld.ts, registry
-  core/        model, HTML/HTTP helpers, diffing, feed format, set filters, crypto
+  core/        model, HTML/HTTP helpers, diffing, feed formats, clothing classifier, set filters, crypto
   pipeline/    D1 store, crawl orchestration, feed publishing, Meta API, product sets
   api/         Hono + OpenAPI routes, auth
   index.ts     Worker entry: fetch, queue, cron

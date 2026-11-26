@@ -96,17 +96,19 @@ export class QueueShim {
 
 export class R2Shim {
   readonly objects = new Map<string, string>();
+  readonly blobs = new Map<string, Uint8Array>();
   readonly metadata = new Map<string, Record<string, string>>();
-  async put(key: string, body: string, opts?: { customMetadata?: Record<string, string> }): Promise<void> {
-    this.objects.set(key, body);
+  async put(key: string, body: string | Uint8Array, opts?: { customMetadata?: Record<string, string> }): Promise<void> {
+    if (typeof body === 'string') this.objects.set(key, body);
+    else this.blobs.set(key, body);
     this.metadata.set(key, opts?.customMetadata ?? {});
   }
   async head(key: string): Promise<{ customMetadata: Record<string, string> } | null> {
     const m = this.metadata.get(key);
     return m ? { customMetadata: m } : null;
   }
-  async get(key: string): Promise<{ body: string } | null> {
-    const v = this.objects.get(key);
-    return v === undefined ? null : { body: v };
+  async get(key: string): Promise<{ body: string | Uint8Array; uploaded: Date; customMetadata: Record<string, string> } | null> {
+    const v = this.objects.get(key) ?? this.blobs.get(key);
+    return v === undefined ? null : { body: v, uploaded: new Date(0), customMetadata: this.metadata.get(key) ?? {} };
   }
 }

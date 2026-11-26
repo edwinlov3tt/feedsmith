@@ -12,9 +12,12 @@ export interface HttpOptions {
   fetchImpl?: typeof fetch;
 }
 
-export type FetchTextResult =
-  | { ok: true; status: number; url: string; text: string; contentType: string }
-  | { ok: false; status: number; url: string; error: string };
+type FetchFailure = { ok: false; status: number; url: string; error: string };
+export type FetchTextResult = { ok: true; status: number; url: string; text: string; contentType: string } | FetchFailure;
+export type FetchBytesResult = { ok: true; status: number; url: string; bytes: Uint8Array; contentType: string } | FetchFailure;
+
+const ACCEPT_TEXT = 'text/html,application/xhtml+xml,application/xml,application/json;q=0.9,*/*;q=0.5';
+const ACCEPT_IMAGE = 'image/jpeg,image/png;q=0.9,*/*;q=0.5';
 
 const DEFAULT_TIMEOUT_MS = 20_000;
 const DEFAULT_MAX_BYTES = 8_000_000;
@@ -47,10 +50,10 @@ export function siteHosts(baseUrl: string): Set<string> {
   return new Set([host, twin]);
 }
 
-async function readCapped(res: Response, maxBytes: number): Promise<string | null> {
+async function readCapped(res: Response, maxBytes: number): Promise<Uint8Array | null> {
   const declared = Number(res.headers.get('content-length') ?? '0');
   if (declared > maxBytes) return null;
-  if (!res.body) return '';
+  if (!res.body) return new Uint8Array();
   const reader = res.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
@@ -70,7 +73,7 @@ async function readCapped(res: Response, maxBytes: number): Promise<string | nul
     buf.set(c, off);
     off += c.byteLength;
   }
-  return new TextDecoder('utf-8').decode(buf);
+  return buf;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -98,11 +101,18 @@ export class HttpClient {
   }
 
   async getText(raw: string): Promise<FetchTextResult> {
+    const res = await this.getBytes(raw, ACCEPT_TEXT);
+    if (!res.ok) return res;
+    const { bytes, ...rest } = res;
+    return { ...rest, text: new TextDecoder('utf-8').decode(bytes) };
+  }
+
+  async getBytes(raw: string, accept: string = ACCEPT_IMAGE): Promise<FetchBytesResult> {
     let lastError = 'not attempted';
     let lastStatus = 0;
     for (let attempt = 0; attempt <= this.#opts.retries; attempt++) {
       if (attempt > 0) await sleep(500 * 2 ** (attempt - 1));
-      const result = await this.#once(raw);
+      const result = await this.#once(raw, accept);
       if (result.ok) return result;
       lastError = result.error;
       lastStatus = result.status;
@@ -113,7 +123,7 @@ export class HttpClient {
     return { ok: false, status: lastStatus, url: raw, error: lastError };
   }
 
-  async #once(raw: string): Promise<FetchTextResult> {
+  async #once(raw: string, accept: string): Promise<FetchBytesResult> {
     let url: URL;
     try {
       url = new URL(raw);
@@ -129,7 +139,7 @@ export class HttpClient {
       try {
         res = await this.#opts.fetchImpl(url.toString(), {
           redirect: 'manual',
-          headers: { 'user-agent': this.#opts.userAgent, accept: 'text/html,application/xhtml+xml,application/xml,application/json;q=0.9,*/*;q=0.5' },
+          headers: { 'user-agent': this.#opts.userAgent, accept },
           signal: AbortSignal.timeout(this.#opts.timeoutMs),
         });
       } catch (err) {
@@ -150,15 +160,15 @@ export class HttpClient {
         await res.body?.cancel();
         return { ok: false, status: res.status, url: url.toString(), error: `HTTP ${res.status}` };
       }
-      let text: string | null;
+      let bytes: Uint8Array | null;
       try {
-        text = await readCapped(res, this.#opts.maxBytes);
+        bytes = await readCapped(res, this.#opts.maxBytes);
       } catch (err) {
         // Body timeouts and resets surface here, after the headers arrived.
         return { ok: false, status: 0, url: url.toString(), error: `body read failed: ${err instanceof Error ? err.message : String(err)}` };
       }
-      if (text === null) return { ok: false, status: res.status, url: url.toString(), error: 'response too large' };
-      return { ok: true, status: res.status, url: url.toString(), text, contentType: res.headers.get('content-type') ?? '' };
+      if (bytes === null) return { ok: false, status: res.status, url: url.toString(), error: 'response too large' };
+      return { ok: true, status: res.status, url: url.toString(), bytes, contentType: res.headers.get('content-type') ?? '' };
     }
     return { ok: false, status: 0, url: url.toString(), error: 'too many redirects' };
   }

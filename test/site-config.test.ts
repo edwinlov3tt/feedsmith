@@ -17,6 +17,11 @@ describe('site config', () => {
     expect(merged).toMatchObject({ defaultBrand: 'Supply Store', brandKeywords: ['Nike'], maxProducts: null });
   });
 
+  it('leaves image copying off unless asked', () => {
+    expect(SiteConfigSchema.parse({}).mirrorImages).toBe(false);
+    expect(SiteConfigSchema.parse({ mirrorImages: true }).mirrorImages).toBe(true);
+  });
+
   it('rejects unknown keys', () => {
     expect(() => SiteConfigPatchSchema.parse({ maxProduct: 1 })).toThrow();
   });

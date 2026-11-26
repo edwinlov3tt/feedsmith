@@ -100,7 +100,7 @@ export function parseInventoryPage(html: string, base: string, condition: 'New' 
       const vin = field(rec, 'identifier')?.toUpperCase() ?? null;
       const abs = url ? absoluteUrl(url, base) : null;
       if (!abs || !vin || !VIN.test(vin)) continue;
-      refs.push({ key: vin, url: abs, category: condition, department: null, clearance: false, featured: false });
+      refs.push({ key: vin, url: abs, category: condition, department: null, clearance: false, featured: false, newItem: false });
     }
   }
   return refs;
@@ -256,6 +256,7 @@ export function parseVehiclePage(html: string, ref: ProductRef, site: Site, page
     department: null,
     clearance: false,
     featured: false,
+    newItem: false,
     vehicle: fields,
   };
   return { kind: 'ok', variants: [variant] };
@@ -320,7 +321,7 @@ export const dealeron: Adapter = {
       const vin = /([A-HJ-NPR-Z0-9]{17})(?:$|[/?#])/i.exec(`${url.pathname}`)?.[1]?.toUpperCase();
       if (!vin) return null;
       const condition = /\/new-/i.test(url.pathname) ? 'New' : 'Used';
-      return { key: vin, url: `${url.origin}${url.pathname}`, category: condition, department: null, clearance: false, featured: false };
+      return { key: vin, url: `${url.origin}${url.pathname}`, category: condition, department: null, clearance: false, featured: false, newItem: false };
     } catch {
       return null;
     }

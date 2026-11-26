@@ -38,7 +38,7 @@ describe('jsonld product reading', () => {
     const url = 'https://www.everlane.com/products/mens-transit-chino-slim-graphite';
     const nodes = productNodes(fixture('jsonld-everlane.html'));
     expect(nodes).toHaveLength(1);
-    const variants = variantsFromJsonLd(nodes, { key: '/products/mens-transit-chino-slim-graphite', url, category: null, department: null, clearance: false, featured: false }, site, url);
+    const variants = variantsFromJsonLd(nodes, { key: '/products/mens-transit-chino-slim-graphite', url, category: null, department: null, clearance: false, featured: false, newItem: false }, site, url);
     expect(variants.length).toBeGreaterThan(5);
     const v = variants[0];
     expect(v?.brand).toBe('Everlane');
@@ -53,7 +53,7 @@ describe('jsonld product reading', () => {
   it('reads a Product with one offer per size (Chubbies)', () => {
     const url = 'https://www.chubbiesshorts.com/products/the-slate';
     const nodes = productNodes(fixture('jsonld-chubbies.html'));
-    const variants = variantsFromJsonLd(nodes, { key: '/products/the-slate', url, category: null, department: null, clearance: false, featured: false }, site, url);
+    const variants = variantsFromJsonLd(nodes, { key: '/products/the-slate', url, category: null, department: null, clearance: false, featured: false, newItem: false }, site, url);
     expect(variants.length).toBeGreaterThan(2);
     expect(variants[0]).toMatchObject({ id: '508017-022', title: 'The Slate', brand: 'Chubbies', price: { amount: '54.99', currency: 'USD' }, size: 'S' });
     expect(variants.every((v) => v.groupId === variants[0]?.groupId)).toBe(true);

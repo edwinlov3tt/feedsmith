@@ -1,6 +1,8 @@
-// Meta catalog feed format. The same row feeds the CSV file, change detection
-// and the Batch API, so what Meta sees is exactly what is compared.
+// Catalog feed formats. The Meta row feeds the CSV file, change detection and
+// the Batch API, so what Meta sees is exactly what is compared. Other
+// platforms' files (TikTok) are views of the same variants.
 
+import { clothingType } from './classify.ts';
 import type { Availability, CatalogType, Money, Variant } from './model.ts';
 
 // Order follows Meta's own catalog template (Commerce Manager > Add items >
@@ -25,12 +27,14 @@ export const META_COLUMNS = [
   'gtin',
   'mpn',
   'product_type',
+  'google_product_category',
   'additional_image_link',
   // Product set filters (see docs/product-sets.md).
   'custom_label_0',
   'custom_label_1',
   'custom_label_2',
   'custom_label_3',
+  'custom_label_4',
 ] as const;
 export type MetaColumn = (typeof META_COLUMNS)[number];
 export type MetaRow = Record<MetaColumn, string>;
@@ -100,7 +104,16 @@ export function priceBand(amount: string): string {
   return '$100+';
 }
 
+/**
+ * Store promotions an item is listed in, space-separated ("featured", "new",
+ * "featured new"); sets filter on it with "contains".
+ */
+export function merchTags(v: Pick<Variant, 'featured' | 'newItem'>): string {
+  return [v.featured ? 'featured' : '', v.newItem ? 'new' : ''].filter(Boolean).join(' ');
+}
+
 export function toMetaRow(v: Variant): MetaRow {
+  const clothing = clothingType(v.title, v.productType);
   return {
     id: v.id,
     title: v.title,
@@ -120,11 +133,120 @@ export function toMetaRow(v: Variant): MetaRow {
     gtin: v.gtin ?? '',
     mpn: v.mpn ?? '',
     product_type: v.productType ?? '',
+    google_product_category: clothing?.google ?? '',
     additional_image_link: v.additionalImageLinks.join(','),
     custom_label_0: v.department ?? '',
     custom_label_1: v.clearance ? 'clearance' : '',
     custom_label_2: priceBand(v.salePrice?.amount ?? v.price.amount),
-    custom_label_3: v.featured ? 'featured' : '',
+    custom_label_3: merchTags(v),
+    custom_label_4: clothing?.label ?? '',
+  };
+}
+
+// TikTok catalog template (Catalog Manager > Add products > Data feed >
+// template, October 2026), in its order, keeping only columns we fill.
+export const TIKTOK_COLUMNS = [
+  'sku_id',
+  'title',
+  'description',
+  'availability',
+  'condition',
+  'price',
+  'link',
+  'image_link',
+  'brand',
+  'additional_image_link',
+  'age_group',
+  'color',
+  'gender',
+  'item_group_id',
+  'google_product_category',
+  'product_type',
+  'sale_price',
+  'gtin',
+  'mpn',
+  'size',
+  'custom_label_0',
+  'custom_label_1',
+  'custom_label_2',
+  'custom_label_3',
+  'custom_label_4',
+] as const;
+
+// TikTok's age_group takes newborn, infant, toddler, kids and adult only.
+const TIKTOK_AGE_GROUPS = new Set(['newborn', 'infant', 'toddler', 'kids', 'adult']);
+
+/** TikTok takes only image links that end in .jpg or .png. */
+export function isJpgOrPng(url: string): boolean {
+  return /\.(jpe?g|png)$/i.test(new URL(url).pathname);
+}
+
+/**
+ * Copies of a site's images on our own host: source URL to public URL, or null
+ * for an image known to be unusable (broken, too small). An image not listed
+ * hasn't been copied yet and keeps its store URL.
+ */
+export type ImageMirror = ReadonlyMap<string, string | null>;
+
+const NO_MIRROR: ImageMirror = new Map();
+
+/** The variant's image links in a format TikTok takes, as the store lists them. */
+export function jpgOrPngImages(v: Variant): string[] {
+  return [v.imageLink, ...v.additionalImageLinks].filter((u): u is string => u !== null && isJpgOrPng(u));
+}
+
+/** The variant's images TikTok can use: the first usable one is the main one, then up to 10 more. */
+export function tiktokImages(v: Variant, mirror: ImageMirror = NO_MIRROR): { main: string | null; extra: string[] } {
+  const usable = jpgOrPngImages(v).flatMap((source) => {
+    const copy = mirror.get(source);
+    if (copy === undefined) return [source];
+    return copy === null ? [] : [copy];
+  });
+  return { main: usable[0] ?? null, extra: usable.slice(1, 11) };
+}
+
+/** Why an item is left out of the TikTok file, or null to include it. */
+export function tiktokProblem(v: Variant, mirror: ImageMirror = NO_MIRROR): string | null {
+  const problem = feedProblem(v);
+  if (problem) return problem;
+  if (v.vehicle) return 'vehicle';
+  // Meta accepts a GTIN or MPN instead of a brand; TikTok requires the brand.
+  if (!v.brand) return 'missing brand';
+  if (!tiktokImages(v).main) return 'image not JPG or PNG';
+  if (!tiktokImages(v, mirror).main) return 'image broken or under 500x500';
+  return null;
+}
+
+/**
+ * Description text for TikTok, which refuses control characters and emoji. Line
+ * breaks become spaces. Invisible characters such as soft hyphens are removed,
+ * along with pictographic symbols; that covers ™ and ®, which Unicode counts as
+ * emoji. Store pages also leave stray "<br" in the text, usually with no ">" and
+ * often stuck to the next word ("<brMSI"). "<brand" isn't one, so a lowercase
+ * letter after it rules it out.
+ */
+export function tiktokDescription(text: string): string {
+  return text
+    .replace(/<[bB][rR](?![a-z])\s*\/?>?/g, ' ')
+    .replace(/[\p{Cf}\p{Extended_Pictographic}️]/gu, '')
+    .replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, ' ')
+    .replace(/ {2,}/g, ' ')
+    .trim();
+}
+
+/** A product in TikTok's catalog columns. Same values as the Meta row, renamed where TikTok differs. */
+export function toTikTokRow(v: Variant, mirror: ImageMirror = NO_MIRROR): FeedRow {
+  const meta = toMetaRow(v);
+  const images = tiktokImages(v, mirror);
+  return {
+    ...meta,
+    sku_id: meta.id,
+    // TikTok requires a description, so one that is nothing but symbols falls back to the title.
+    description: tiktokDescription(v.description) || v.title,
+    availability: v.availability,
+    image_link: images.main ?? '',
+    additional_image_link: images.extra.join(','),
+    age_group: TIKTOK_AGE_GROUPS.has(meta.age_group) ? meta.age_group : '',
   };
 }
 
@@ -204,13 +326,16 @@ export function changedColumns(before: Variant, after: Variant): string[] {
   return [...cols].filter((c) => a[c] !== b[c]);
 }
 
+/** PrismRBS's stand-in for a product without a photo; an ad showing it is worse than no item. */
+export const PLACEHOLDER_IMAGE = /\/not_available[^/]*$/i;
+
 /** Meta rejects items without these; such variants are left out of the feed. */
 export function feedProblem(v: Variant): string | null {
-  if (!v.imageLink) return 'missing image';
-  if (v.vehicle) {
-    if (Number(v.price.amount) <= 0) return 'missing price';
-    return null;
-  }
+  // Rows stored before the adapter dropped placeholders can still carry one.
+  if (!v.imageLink || PLACEHOLDER_IMAGE.test(v.imageLink)) return 'missing image';
+  // $0 is a store data error, or "Call for Price" on a dealer site; an ad must not say free.
+  if (Number(v.price.amount) <= 0) return 'missing price';
+  if (v.vehicle) return null;
   if (!v.brand && !v.gtin && !v.mpn) return 'missing brand';
   return null;
 }
@@ -222,10 +347,10 @@ function csvCell(value: string): string {
   return /[",\r\n]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
 }
 
-export function csvHeader(type: CatalogType = 'commerce'): string {
-  return `${feedColumns(type).join(',')}\r\n`;
+export function csvHeader(type: CatalogType = 'commerce', columns: readonly string[] = feedColumns(type)): string {
+  return `${columns.join(',')}\r\n`;
 }
 
-export function csvLine(row: FeedRow, type: CatalogType = 'commerce'): string {
-  return `${feedColumns(type).map((c) => csvCell(row[c] ?? '')).join(',')}\r\n`;
+export function csvLine(row: FeedRow, type: CatalogType = 'commerce', columns: readonly string[] = feedColumns(type)): string {
+  return `${columns.map((c) => csvCell(row[c] ?? '')).join(',')}\r\n`;
 }

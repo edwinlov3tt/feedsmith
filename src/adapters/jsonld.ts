@@ -274,6 +274,7 @@ export function variantsFromJsonLd(nodes: JsonRecord[], ref: ProductRef, site: S
           department: ref.department,
           clearance: ref.clearance,
           featured: ref.featured,
+          newItem: ref.newItem,
           vehicle: null,
         });
       }
@@ -344,7 +345,7 @@ export const jsonld: Adapter = {
       if (exclude.some((re) => re.test(url.pathname))) continue;
       const key = pageKey(url.toString());
       if (key === '/' || byKey.has(key)) continue;
-      byKey.set(key, { key, url: `${url.origin}${url.pathname}`, category: null, department: null, clearance: false, featured: false });
+      byKey.set(key, { key, url: `${url.origin}${url.pathname}`, category: null, department: null, clearance: false, featured: false, newItem: false });
     }
     let refs = [...byKey.values()];
     let truncated = sitemapTruncated;
@@ -359,7 +360,7 @@ export const jsonld: Adapter = {
   refFromUrl(raw) {
     try {
       const url = new URL(raw);
-      return { key: pageKey(url.toString()), url: `${url.origin}${url.pathname}`, category: null, department: null, clearance: false, featured: false };
+      return { key: pageKey(url.toString()), url: `${url.origin}${url.pathname}`, category: null, department: null, clearance: false, featured: false, newItem: false };
     } catch {
       return null;
     }

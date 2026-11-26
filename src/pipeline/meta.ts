@@ -53,7 +53,7 @@ export function batchItem(v: Variant): BatchData {
     brand: row.brand,
     item_group_id: row.item_group_id,
   };
-  for (const k of ['sale_price', 'size', 'color', 'gender', 'age_group', 'product_type', 'gtin', 'mpn', 'custom_label_0', 'custom_label_1', 'custom_label_2', 'custom_label_3'] as const) {
+  for (const k of ['sale_price', 'size', 'color', 'gender', 'age_group', 'product_type', 'google_product_category', 'gtin', 'mpn', 'custom_label_0', 'custom_label_1', 'custom_label_2', 'custom_label_3', 'custom_label_4'] as const) {
     if (row[k]) data[k] = row[k];
   }
   return data;
@@ -123,7 +123,7 @@ const BatchResponse = z
     validation_status: z.array(z.object({ retailer_id: z.string(), errors: Issues, warnings: Issues }).passthrough()).optional(),
   })
   .passthrough();
-const GraphError = z.object({ error: z.object({ message: z.string(), code: z.number().optional() }) });
+const GraphError = z.object({ error: z.object({ message: z.string(), code: z.number().optional(), error_user_msg: z.string().max(1000).optional() }) });
 
 export interface ItemIssue {
   id: string;
@@ -256,7 +256,9 @@ async function graphCall(target: MetaTarget, url: string, init: RequestInit, fet
   if (!res.ok) {
     const err = GraphError.safeParse(body);
     const code = err.success && err.data.error.code !== undefined ? ` (code ${err.data.error.code})` : '';
-    throw new Error(`Meta ${res.status}${code}: ${err.success ? err.data.error.message : 'no error body'}`);
+    // "Invalid parameter" alone says little; Meta's user message says which rule failed.
+    const detail = err.success && err.data.error.error_user_msg ? ` (${err.data.error.error_user_msg})` : '';
+    throw new Error(`Meta ${res.status}${code}: ${err.success ? err.data.error.message : 'no error body'}${detail}`);
   }
   return body;
 }

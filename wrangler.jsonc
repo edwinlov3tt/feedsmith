@@ -30,7 +30,9 @@
   },
   "vars": {
     "USER_AGENT": "FeedsmithBot/0.1",
-    "META_GRAPH_VERSION": "v23.0"
+    "META_GRAPH_VERSION": "v23.0",
+    // This Worker's own address, for image links in feeds (queue handlers have no request to read it from).
+    "PUBLIC_URL": "https://feedsmith.edwin-6f1.workers.dev"
   }
   // Secrets (wrangler secret put): ADMIN_TOKEN, TOKEN_ENC_KEY (base64, 32 bytes).
 }

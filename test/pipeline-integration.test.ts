@@ -104,6 +104,22 @@ describe('pipeline end to end', () => {
     expect(runRow(id)?.['status']).toBe('published');
     expect(inStock()).toBe(8);
     expect(feedRows()).toBe(8);
+    // The TikTok file comes from the same run, with TikTok's ID column.
+    const tiktok = (r2.objects.get('feeds/supe-store/tiktok.csv') ?? '').split('\r\n').filter(Boolean);
+    expect(tiktok[0]?.startsWith('sku_id,title,description,availability,condition,price,link,image_link,brand')).toBe(true);
+    // The book's only image is cover_image.asp, which TikTok can't take.
+    expect(tiktok).toHaveLength(8);
+  });
+
+  it('serves the TikTok feed with the site feed password', async () => {
+    await fullRun();
+    await drain();
+    db.db.prepare("UPDATE sites SET feed_password_hash = ? WHERE id = 'supe-store'").run(await sha256('feed-pw'));
+    const wrong = await app.request('/feeds/supe-store/tiktok.csv', { headers: { authorization: `Basic ${btoa('supe-store:nope')}` } }, env);
+    expect(wrong.status).toBe(401);
+    const res = await app.request('/feeds/supe-store/tiktok.csv', { headers: { authorization: `Basic ${btoa('supe-store:feed-pw')}` } }, env);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('x-feed-items')).toBe('7');
   });
 
   it('allows only one run in progress per site', async () => {
@@ -228,6 +244,22 @@ describe('pipeline end to end', () => {
     expect(runRow(sweep.run.id)?.['status']).toBe('rejected');
     expect(String(runRow(sweep.run.id)?.['error'])).toMatch(/feed would shrink from 8 to 1 items/);
     expect(r2.objects.get('feeds/supe-store/meta.csv')).toBe(live);
+  });
+
+  it('keeps the last good TikTok file when only it collapses, and still publishes Meta', async () => {
+    await fullRun();
+    await drain();
+    // As if the live TikTok file had far more items than this run can give it.
+    r2.metadata.set('feeds/supe-store/tiktok.csv', { items: '100' });
+    const liveTikTok = r2.objects.get('feeds/supe-store/tiktok.csv');
+    const sweep = await startRun(env, 'supe-store', 'sweep');
+    if (sweep.kind !== 'started') throw new Error('sweep not started');
+    await drain();
+    const row = runRow(sweep.run.id);
+    expect(row?.['status']).toBe('published');
+    expect(JSON.parse(String(row?.['notes_json']))['tiktokHeld']).toMatch(/TikTok feed would shrink from 100 to 7 items/);
+    expect(r2.objects.get('feeds/supe-store/tiktok.csv')).toBe(liveTikTok);
+    expect(r2.metadata.get('feeds/supe-store/meta.csv')?.['runId']).toBe(sweep.run.id);
   });
 
   it('gives a SKU listed under two products to the lower product key, stably', async () => {

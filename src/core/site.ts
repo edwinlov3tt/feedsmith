@@ -32,6 +32,8 @@ const fields = {
   minFeedRatio: z.number().min(0).max(1),
   /** Vehicles: the dealership. Filled from the site at discovery; editable. */
   dealer: DealerSchema.nullable(),
+  /** Copy product images to our own host for the TikTok file. Check the site's robots.txt before turning this on. */
+  mirrorImages: z.boolean(),
 };
 
 type ConfigValues = { [K in keyof typeof fields]: z.infer<(typeof fields)[K]> };
@@ -52,6 +54,7 @@ const DEFAULTS: ConfigValues = {
   maxSoldOutRate: 0.25,
   minFeedRatio: 0.8,
   dealer: null,
+  mirrorImages: false,
 };
 
 /** A partial update: only the keys sent. No defaults, so unsent settings are left alone. */
@@ -78,6 +81,7 @@ export const SiteConfigSchema = SiteConfigPatchSchema.transform(
     maxSoldOutRate: p.maxSoldOutRate ?? DEFAULTS.maxSoldOutRate,
     minFeedRatio: p.minFeedRatio ?? DEFAULTS.minFeedRatio,
     dealer: p.dealer ?? DEFAULTS.dealer,
+    mirrorImages: p.mirrorImages ?? DEFAULTS.mirrorImages,
   }),
 );
 

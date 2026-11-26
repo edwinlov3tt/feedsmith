@@ -111,6 +111,8 @@ export const VariantSchema = z.object({
   clearance: z.boolean().default(false),
   /** Listed in a featured category. */
   featured: z.boolean().default(false),
+  /** Listed in a "new items" or "new arrivals" category. */
+  newItem: z.boolean().default(false),
   /** Set on vehicles-catalog items; null for products. */
   vehicle: VehicleFieldsSchema.nullable().default(null),
 });
@@ -126,6 +128,7 @@ export const ProductRefSchema = z.object({
   department: shortText.nullable().default(null),
   clearance: z.boolean().default(false),
   featured: z.boolean().default(false),
+  newItem: z.boolean().default(false),
 });
 export type ProductRef = z.infer<typeof ProductRefSchema>;
 

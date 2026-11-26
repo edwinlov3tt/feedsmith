@@ -96,6 +96,16 @@ describe('public surface', () => {
     expect(res.headers.get('www-authenticate')).toContain('Basic');
   });
 
+  it('asks for Basic auth on the TikTok feed', async () => {
+    const res = await app.request(
+      '/feeds/supe-store/tiktok.csv',
+      {},
+      env({ DB: { prepare: () => ({ bind: () => ({ first: async () => null }) }) } }),
+    );
+    expect(res.status).toBe(401);
+    expect(res.headers.get('www-authenticate')).toContain('Basic');
+  });
+
   it('asks for Basic auth on the feed', async () => {
     const res = await app.request(
       '/feeds/supe-store/meta.csv',

@@ -20,8 +20,9 @@ import { diffProduct } from '../core/diff.ts';
 import { HttpClient, mapLimit, siteHosts } from '../core/http.ts';
 import { DealerSchema, ProductRefSchema, VariantSchema, type ProductRef, type Variant } from '../core/model.ts';
 import type { Site } from '../core/site.ts';
+import { handleMirror, imageMirror, IMAGES_PER_MESSAGE, syncImages } from './images.ts';
 import { pushVariants } from './meta.ts';
-import { buildFeed, publishedItems, writeFeed } from './publish.ts';
+import { buildFeed, publishedItems, tiktokFeedKey, writeFeed } from './publish.ts';
 import {
   activeRefs,
   activeRun,
@@ -70,6 +71,7 @@ export const CrawlMessageSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('discover'), runId: z.uuid(), siteId: z.string() }),
   z.object({ type: z.literal('read'), runId: z.uuid(), siteId: z.string(), refs: z.array(ProductRefSchema).min(1).max(REFS_PER_MESSAGE) }),
   z.object({ type: z.literal('finalize'), runId: z.uuid(), siteId: z.string() }),
+  z.object({ type: z.literal('mirror'), runId: z.uuid(), siteId: z.string(), urls: z.array(z.url().max(2000)).min(1).max(IMAGES_PER_MESSAGE) }),
 ]);
 export type CrawlMessage = z.infer<typeof CrawlMessageSchema>;
 
@@ -331,7 +333,8 @@ async function handleFinalize(env: Env, msg: Extract<CrawlMessage, { type: 'fina
   // Last check before anything leaves: the feed itself must not collapse. This
   // catches what per-product checks can't, such as a config change that makes
   // most items unpublishable.
-  const feed = await buildFeed(env.DB, site.id, catalogTypeOf(site.platform));
+  const mirror = site.config.mirrorImages ? await imageMirror(env, site.id) : undefined;
+  let feed = await buildFeed(env.DB, site.id, catalogTypeOf(site.platform), mirror);
   const previous = await publishedItems(env.FEEDS, site.id);
   if (previous !== null && previous > 0 && feed.items < previous * site.config.minFeedRatio) {
     const reason = `feed would shrink from ${previous} to ${feed.items} items (${pct(feed.items / previous)} of the live feed, under ${pct(site.config.minFeedRatio)})`;
@@ -339,12 +342,27 @@ async function handleFinalize(env: Env, msg: Extract<CrawlMessage, { type: 'fina
     await finishRun(env.DB, run.id, 'rejected', reason, notes);
     return;
   }
+  // The TikTok file can collapse on its own (say, the store's images turn
+  // .webp). Then the last good TikTok file stays live and the Meta feed goes out.
+  const tiktokPrevious = feed.tiktok ? await publishedItems(env.FEEDS, site.id, tiktokFeedKey(site.id)) : null;
+  if (feed.tiktok && tiktokPrevious !== null && tiktokPrevious > 0 && feed.tiktok.items < tiktokPrevious * site.config.minFeedRatio) {
+    notes['tiktokHeld'] = `TikTok feed would shrink from ${tiktokPrevious} to ${feed.tiktok.items} items (${pct(feed.tiktok.items / tiktokPrevious)} of the live file, under ${pct(site.config.minFeedRatio)})`;
+    feed = { ...feed, tiktok: null };
+  }
   notes['feed'] = await writeFeed(env.FEEDS, site.id, run.id, feed);
   try {
     notes['meta'] = await pushToMeta(env, site);
   } catch (err) {
     // The feed is already live; the unpushed changes go out with the next run.
     notes['meta'] = { error: err instanceof Error ? err.message : String(err) };
+  }
+  if (site.config.mirrorImages) {
+    try {
+      notes['images'] = await syncImages(env, site, run.id, feed.imageUrls);
+    } catch (err) {
+      // The feed is live; images not queued now are due on the next run.
+      notes['images'] = { error: err instanceof Error ? err.message : String(err) };
+    }
   }
   if (counts.error > 0) notes['errorsSample'] = await sampleErrors(env.DB, run.id, 20);
   await finishRun(env.DB, run.id, 'published', null, notes);
@@ -366,6 +384,8 @@ export async function handleMessage(env: Env, body: unknown, messageId: string):
       return handleRead(env, msg);
     case 'finalize':
       return handleFinalize(env, msg, messageId);
+    case 'mirror':
+      return handleMirror(env, msg, await getSite(env.DB, msg.siteId));
     default: {
       const unreachable: never = msg;
       throw new Error(`unhandled message ${JSON.stringify(unreachable)}`);
@@ -393,6 +413,9 @@ export async function handleDeadLetter(env: Env, body: unknown): Promise<void> {
       if (run.status === 'discovering' || run.status === 'finalizing') {
         await finishRun(env.DB, run.id, 'failed', `${msg.type} failed after retries`, run.notes);
       }
+      return;
+    case 'mirror':
+      // The images are still pending, so the next run queues them again.
       return;
     default: {
       const unreachable: never = msg;

@@ -9,7 +9,7 @@ import { fixture, testSite } from './helpers.ts';
 const BASE = 'https://www.northstarfordduluth.com/';
 const dealer = parseDealer(fixture('dealeron-home.html'));
 const site = testSite({ id: 'northstar-ford', name: 'NorthStar Ford', baseUrl: BASE, platform: 'dealeron' }, { dealer, defaultBrand: null, brandKeywords: [] });
-const ref = (vin: string, condition: 'New' | 'Used', url: string): ProductRef => ({ key: vin, url, category: condition, department: null, clearance: false, featured: false });
+const ref = (vin: string, condition: 'New' | 'Used', url: string): ProductRef => ({ key: vin, url, category: condition, department: null, clearance: false, featured: false, newItem: false });
 
 function read(file: string, vin: string, condition: 'New' | 'Used'): Variant {
   const url = `${BASE}${condition === 'New' ? 'new' : 'used'}-Duluth-x-${vin}`;
@@ -55,6 +55,7 @@ describe('dealeron discovery', () => {
       department: null,
       clearance: false,
       featured: false,
+      newItem: false,
     });
     expect(new Set(refs.map((r) => r.key)).size).toBe(24);
   });

@@ -68,11 +68,19 @@ how Meta finished processing.
 **7b. Labels for product sets (2026-10-04).** PrismRBS discovery reads the
 store's department pages (scoped to `<main>`, since the global nav links every
 category) to map each category to its department, and merges every category a
-product is listed in. The lowest-ID non-promotional category becomes
-`product_type`; clearance/sale and featured listings become flags. The feed
-carries `custom_label_0` department, `custom_label_1` clearance,
-`custom_label_2` price band and `custom_label_3` featured, which product sets
-filter on (docs/product-sets.md). Labels live on the product row, so sweeps
+product is listed in. Breadcrumb links inside `<main>` are read apart from
+sub-groups: one pointing back up to a page found in an earlier round is a
+parent, not a child (uwyostore.com's "Apparel\ Men" links "Apparel"), and
+other breadcrumb links count as sub-groups as before. A department's own
+categories take its name before ones it inherits through a sub-group, so a
+department the nav lists on its own (Club Sports) keeps its name. The
+lowest-ID non-promotional category becomes
+`product_type`; clearance/sale, featured and new-items listings become flags.
+The feed carries `custom_label_0` department, `custom_label_1` clearance,
+`custom_label_2` price band and `custom_label_3` promotions (`featured`, `new`,
+or both space-separated, so sets filter with "contains"; new items added
+2026-10-29, since all five labels were taken), which product sets filter on
+(docs/product-sets.md). Labels live on the product row, so sweeps
 keep them without rediscovering.
 
 **7c. Clients and product sets (2026-10-04).** Sites belong to clients.
@@ -91,6 +99,55 @@ and get their own feed columns (Meta's automotive spec), Batch API item type
 `body_style`, numeric `year`) and default sets. Diffing, gates and publishing
 are shared. Vehicle sites default to looser gone/sold-out gates (30%), because
 a sold car's page 404s as part of a normal day.
+
+**7e. Items left out of the feed (2026-10-20).** An item without an image,
+with a $0 price, or (for products) without a brand, GTIN or MPN is left out of
+the feed and the Batch API, and counted under the run's `feed.skipped`. Meta
+requires each field, and an ad must not show a placeholder photo or say free.
+PrismRBS's "image not available" placeholder counts as no image, both when
+the adapter reads a page and when the feed is built (rows stored before the
+adapter learned the placeholder still carry it).
+
+**7f. Other platforms and clothing types (2026-10-27).** One crawl feeds every
+platform; each platform gets its own file rather than one file for all, since
+they differ in small, breaking ways: TikTok's ID column is `sku_id`, it takes
+only JPG and PNG image links, it lists `preorder` where Meta has "available for
+order", and its `age_group` has no `teen`. `/feeds/{site}/tiktok.csv` is built
+in the same pass as the Meta file and written only when the run passes its
+gates; vehicle sites get none. Product sets on TikTok are made in its Catalog
+Manager, so the feed has to carry what they filter on. Both files carry a
+`google_product_category` and a clothing type in `custom_label_4`, from fixed
+rules over the title and store category (`src/core/classify.ts`; no model, so
+the same title always gets the same answer). The product name's last garment
+word decides ("Helmet Tee" is a tee; "Sweatshirt Blanket" isn't clothing);
+what follows "with" is decoration; a store category that names only
+non-garments ("Toys And Games") outranks the title; regalia and pet gear are
+excluded. Google paths stop at three levels because TikTok reads no deeper,
+and Google has no sweatshirt category, so sweatshirts sit in Shirts & Tops and
+the label carries the finer split. `product_type` keeps the store's category,
+so existing sets don't change. On 2026-10-27 the rules classified 1,078 of
+1,094 Supply Store apparel products and 749 of 794 at uwyostore.com; most of
+the rest aren't clothing (hair bows, jewelry, bags).
+
+**7g. Hosting product images ourselves (2026-11-06).** PrismRBS stores refuse
+HTTPS from outside the US, and TikTok lists non-US addresses for image fetching,
+so the `mirrorImages` site setting copies images to R2 and the TikTok file links
+to them. Only TikTok's file changes: Meta reads the store fine, and new links
+there would re-push and re-review a working catalog. Change detection compares
+Meta rows, so copying doesn't mark items as changed. Copying runs after a
+published run, on the crawl queue, capped at 1,000 images a run, and only from
+the site's own host, like the crawler. Files are named by a hash of their
+content, so a replaced image gets a new URL and platforms refetch it; each image
+is re-read every 30 days. The format and size come from the file's bytes, so a
+web page served at an image link is never stored or served. The route is public
+because platforms fetch images without credentials. An image not copied yet
+keeps the store's link, so turning this on can't empty a feed.
+
+**7h. TikTok descriptions are cleaned (2026-11-06).** TikTok's issue list refuses
+control characters and emoji, and 98% of descriptions had line breaks. The TikTok
+file's descriptions lose both, including ™ and ® (which Unicode counts as emoji),
+invisible characters and stray `<br`. Only that file changes, so Meta's items don't
+change or re-push. Titles aren't cleaned yet.
 
 **8. Idempotent queue handling.** Outcomes are keyed (run, product) with
 INSERT OR IGNORE. The last reader claims finalize with a conditional UPDATE, and

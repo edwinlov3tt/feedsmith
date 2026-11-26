@@ -89,7 +89,9 @@ describe('meta batch payload', () => {
         gender: 'unisex',
         age_group: 'adult',
         product_type: 'T-Shirts',
+        google_product_category: 'Apparel & Accessories > Clothing > Shirts & Tops',
         custom_label_2: '$25-$50',
+        custom_label_4: 'T-Shirts',
       },
     });
   });
@@ -197,6 +199,18 @@ describe('meta product sets', () => {
     const { calls, fetchImpl } = fakeMeta(null);
     expect(await upsertProductSet(target, { ...set, metaSetId: '888000333' }, fetchImpl)).toEqual({ metaSetId: '888000333', action: 'updated' });
     expect(calls).toHaveLength(1);
+  });
+
+  it("passes on Meta's reason when it refuses a set", async () => {
+    // Seen live 2026-10-29: Meta won't create a set that matches no catalog items yet.
+    const fetchImpl: typeof fetch = async (input, init) => {
+      if (String(input).includes('retailer_id=')) return new Response(JSON.stringify({ data: [] }));
+      if (init?.method === 'POST') {
+        return new Response(JSON.stringify({ error: { message: 'Invalid parameter', code: 100, error_user_msg: 'We disallow the creation of empty product sets.' } }), { status: 400 });
+      }
+      return new Response('{}');
+    };
+    await expect(upsertProductSet(target, { ...set, metaSetId: null }, fetchImpl)).rejects.toThrow('Meta 400 (code 100): Invalid parameter (We disallow the creation of empty product sets.)');
   });
 });
 

@@ -20,6 +20,7 @@ export const SET_FIELDS = [
   'custom_label_1',
   'custom_label_2',
   'custom_label_3',
+  'custom_label_4',
   'retailer_id',
   'price_amount',
 ] as const;

@@ -5,10 +5,12 @@ import { secureHeaders } from 'hono/secure-headers';
 import { adapterFor, catalogTypeOf, detectPlatform } from '../adapters/registry.ts';
 import { decryptSecret, encryptSecret, randomToken, safeEqual, sha256Hex } from '../core/crypto.ts';
 import { HttpClient, parsePublicHttpsUrl, siteHosts } from '../core/http.ts';
+import { IMAGE_CONTENT_TYPES, MIN_IMAGE_PX } from '../core/image.ts';
 import { AVAILABILITIES, CATALOG_TYPES, PLATFORMS, VariantSchema } from '../core/model.ts';
 import { SiteConfigPatchSchema, SiteConfigSchema, SiteIdSchema, validatePatterns, type Site } from '../core/site.ts';
 import { CatalogIdSchema, checkBatchStatus, verifyCatalogAccess } from '../pipeline/meta.ts';
-import { feedKey } from '../pipeline/publish.ts';
+import { imageKey } from '../pipeline/images.ts';
+import { feedKey, tiktokFeedKey } from '../pipeline/publish.ts';
 import { httpFor, startRun } from '../pipeline/run.ts';
 import { countSets, defaultSetDefinitions, metaTargetFor, setCsv, setItems, storedFilter, syncSet, unsyncSet } from '../pipeline/sets.ts';
 import { parseSetFilter, SET_FIELDS, toMetaFilter, VEHICLE_SET_FIELDS } from '../core/set-filter.ts';
@@ -28,6 +30,7 @@ import {
   type StoredSet,
   getRun,
   getSite,
+  imageStats,
   insertSite,
   listChanges,
   listRuns,
@@ -77,6 +80,8 @@ const SiteSchema = z
     clientId: z.string().nullable(),
     lastDiscoveryCount: z.number().nullable(),
     feedUrl: z.string(),
+    /** Null for vehicles sites, which TikTok takes in another format. */
+    tiktokFeedUrl: z.string().nullable(),
     createdAt: z.string(),
     updatedAt: z.string(),
   })
@@ -120,6 +125,7 @@ function siteDto(site: SiteRecord, origin: string): z.infer<typeof SiteSchema> {
     clientId: site.clientId,
     lastDiscoveryCount: site.lastDiscoveryCount,
     feedUrl: feedUrlFor(origin, site.id),
+    tiktokFeedUrl: catalogTypeOf(site.platform) === 'commerce' ? `${origin}/feeds/${site.id}/tiktok.csv` : null,
     createdAt: site.createdAt,
     updatedAt: site.updatedAt,
   };
@@ -594,6 +600,15 @@ app.openapi(
 
 // ---------- feed ----------
 
+function feedHeaders(object: R2ObjectBody): Record<string, string> {
+  return {
+    'content-type': 'text/csv; charset=utf-8',
+    'cache-control': 'private, no-store',
+    'last-modified': object.uploaded.toUTCString(),
+    'x-feed-items': object.customMetadata?.['items'] ?? '',
+  };
+}
+
 app.openapi(
   createRoute({
     method: 'get',
@@ -617,12 +632,110 @@ app.openapi(
     }
     const object = await c.env.FEEDS.get(feedKey(siteId));
     if (!object) return c.json({ error: 'no feed published yet' }, 404);
+    return c.body(object.body, 200, feedHeaders(object));
+  },
+);
+
+app.openapi(
+  createRoute({
+    method: 'get',
+    path: '/feeds/{siteId}/tiktok.csv',
+    tags: ['Feeds'],
+    summary: 'TikTok catalog feed (CSV)',
+    description:
+      "The same items as the Meta feed in TikTok's catalog columns (`sku_id` for the ID), written by the same run. Items whose only images aren't JPG or PNG are left out, since TikTok takes no other format. Product catalogs only. Same HTTP Basic credentials as the Meta feed; use as a scheduled data feed URL in TikTok Catalog Manager.",
+    security: [{ FeedBasic: [] }],
+    request: { params: SiteIdParam },
+    responses: {
+      200: { description: 'CSV feed', content: { 'text/csv': { schema: z.string() } } },
+      401: { description: 'Missing or wrong feed credentials', content: { 'application/json': { schema: ErrorSchema } } },
+      404: { description: 'No TikTok feed published yet (the next run writes it), or a vehicles site', content: { 'application/json': { schema: ErrorSchema } } },
+    },
+  }),
+  async (c) => {
+    const { siteId } = c.req.valid('param');
+    if (!(await feedAuthorized(c.env.DB, siteId, c.req.header('authorization')))) {
+      c.header('WWW-Authenticate', 'Basic realm="feedsmith", charset="UTF-8"');
+      return c.json({ error: 'unauthorized' }, 401);
+    }
+    const object = await c.env.FEEDS.get(tiktokFeedKey(siteId));
+    if (!object) return c.json({ error: 'no TikTok feed published yet' }, 404);
+    return c.body(object.body, 200, feedHeaders(object));
+  },
+);
+
+// ---------- images ----------
+
+const ImageFileParam = z.object({
+  siteId: SiteIdSchema.openapi({ param: { name: 'siteId', in: 'path' }, example: 'supe-store' }),
+  file: z
+    .string()
+    .regex(/^[0-9a-f]{32}\.(jpg|png)$/)
+    .openapi({ param: { name: 'file', in: 'path' }, example: '0123456789abcdef0123456789abcdef.jpg' }),
+});
+
+app.openapi(
+  createRoute({
+    method: 'get',
+    path: '/images/{siteId}/{file}',
+    tags: ['Feeds'],
+    summary: 'A product image copied to our host',
+    description:
+      'Public, since catalog platforms fetch images without credentials; these are the same photos the store shows publicly. File names are a hash of the content, so a file never changes and can be cached indefinitely. Only files whose bytes were checked to be a JPG or PNG are stored.',
+    request: { params: ImageFileParam },
+    responses: {
+      200: { description: 'The image', content: { 'image/jpeg': { schema: z.string() }, 'image/png': { schema: z.string() } } },
+      400: invalid[400],
+      404: notFound[404],
+    },
+  }),
+  async (c) => {
+    const { siteId, file } = c.req.valid('param');
+    const object = await c.env.FEEDS.get(imageKey(siteId, file));
+    if (!object) return c.json({ error: 'image not found' }, 404);
     return c.body(object.body, 200, {
-      'content-type': 'text/csv; charset=utf-8',
-      'cache-control': 'private, no-store',
-      'last-modified': object.uploaded.toUTCString(),
-      'x-feed-items': object.customMetadata?.['items'] ?? '',
+      'content-type': file.endsWith('.png') ? IMAGE_CONTENT_TYPES.png : IMAGE_CONTENT_TYPES.jpg,
+      'cache-control': 'public, max-age=31536000, immutable',
     });
+  },
+);
+
+app.openapi(
+  createRoute({
+    method: 'get',
+    path: '/admin/sites/{siteId}/images',
+    tags: ['Sites'],
+    summary: 'Image copying status',
+    description: 'How many of the images the TikTok file draws on have been copied to our host. Turn copying on with the `mirrorImages` site setting; the next published run starts it, and later runs put the copies in the feed.',
+    security: admin,
+    request: { params: SiteIdParam },
+    responses: {
+      200: {
+        description: 'Counts, and up to 20 images with a problem',
+        content: {
+          'application/json': {
+            schema: z.object({
+              enabled: z.boolean(),
+              total: z.number(),
+              copied: z.number(),
+              pending: z.number(),
+              bad: z.number(),
+              underMinSize: z.number(),
+              bytes: z.number(),
+              problems: z.array(z.object({ url: z.string(), error: z.string() })),
+            }),
+          },
+        },
+      },
+      ...unauthorized,
+      ...notFound,
+    },
+  }),
+  async (c) => {
+    const { siteId } = c.req.valid('param');
+    const site = await getSite(c.env.DB, siteId);
+    if (!site) return c.json({ error: 'site not found' }, 404);
+    return c.json({ enabled: site.config.mirrorImages, ...(await imageStats(c.env.DB, siteId, MIN_IMAGE_PX)) }, 200);
   },
 );
 
@@ -1009,18 +1122,107 @@ app.openapi(
 
 // ---------- docs ----------
 
-app.openAPIRegistry.registerComponent('securitySchemes', 'AdminToken', { type: 'http', scheme: 'bearer', description: 'ADMIN_TOKEN secret' });
-app.openAPIRegistry.registerComponent('securitySchemes', 'FeedBasic', { type: 'http', scheme: 'basic', description: 'site ID and feed password' });
-
-app.doc31('/openapi.json', {
-  openapi: '3.1.0',
-  info: {
-    title: 'Feedsmith',
-    version: '0.1.0',
-    description: 'Crawls storefronts that have no feed export and publishes Meta catalog feeds, with stock and price changes pushed to the Meta Batch API.',
-  },
+app.openAPIRegistry.registerComponent('securitySchemes', 'AdminToken', {
+  type: 'http',
+  scheme: 'bearer',
+  description: 'The operator token (the `ADMIN_TOKEN` secret). Required on every `/admin/*` route. Missing or wrong: `401`. Not configured on the server: `503`.',
 });
-app.get('/docs', Scalar({ url: '/openapi.json', pageTitle: 'Feedsmith API' }));
+app.openAPIRegistry.registerComponent('securitySchemes', 'FeedBasic', {
+  type: 'http',
+  scheme: 'basic',
+  description: "HTTP Basic for feed URLs. Username: the site ID. Password: that site's feed password (shown once at site creation; rotate with `POST /admin/sites/{siteId}/feed-password`). This is what you enter in Commerce Manager when adding the feed URL.",
+});
+
+const API_OVERVIEW = `
+Feedsmith builds Meta catalog feeds for stores that can't export one. It reads a
+store's public pages, tracks every item's price and stock, and keeps a Meta
+catalog current three ways: a **feed URL** Commerce Manager fetches on a
+schedule, **live updates** through Meta's Catalog Batch API, and **product sets**
+it creates and keeps in sync.
+
+## Authentication
+
+| Routes | How |
+|---|---|
+| \`/admin/*\` | \`Authorization: Bearer <ADMIN_TOKEN>\` |
+| \`/feeds/*\` | HTTP Basic: site ID and the site's feed password |
+| \`/health\`, \`/openapi.json\`, \`/docs\` | public |
+
+## Quickstart: onboard a store
+
+1. \`POST /admin/clients\` to create the client.
+2. \`POST /admin/sites\` to create the site. The platform is detected from the
+   homepage. **Save the \`feedPassword\` in the response**; it is shown once.
+3. \`POST /admin/sites/{siteId}/preview\` with one product URL, to check what
+   will be extracted.
+4. \`POST /admin/sites/{siteId}/runs\` with \`{"mode":"full"}\`, then poll
+   \`GET /admin/runs/{runId}\` until \`status\` is \`published\`.
+5. In Commerce Manager, add **Data feed > Use a URL**: \`/feeds/{siteId}/meta.csv\`,
+   with the site ID and feed password. For TikTok, use
+   \`/feeds/{siteId}/tiktok.csv\` in Catalog Manager with the same credentials.
+6. Optional: \`PUT /admin/sites/{siteId}/meta\` with a catalog ID and a
+   system-user token (\`catalog_management\`) for live updates, then
+   \`POST /admin/sites/{siteId}/product-sets/defaults\`.
+
+After that it runs on its own: a full crawl nightly (07:15 UTC) and a price and
+stock sweep every 2 hours.
+
+## Catalog types
+
+The site's platform decides the catalog type and so the feed format:
+
+| Platform | Catalog type | Feed |
+|---|---|---|
+| \`prismrbs\` (campus stores), \`jsonld\` (stores with schema.org Product data) | \`commerce\` | Meta product catalog columns, plus a TikTok file |
+| \`dealeron\` (car dealers) | \`vehicles\` | Meta automotive inventory columns |
+
+## Safety
+
+A crawl that looks wrong is **rejected**, and the last good feed stays live, if
+any of these is true: more than 20% of pages fail; more than 10% of products
+report gone (30% for vehicles); more than 25% of in-stock items sell out at
+once (30% for vehicles); discovery finds under 80% of last time's products; or
+the feed would shrink by more than 20%. The reasons are on the run
+(\`error\`, \`notes.gates\`). Sold-out items become out of stock or not
+available; nothing is deleted.
+
+## Errors
+
+Errors are JSON: \`{"error": "message"}\`. Invalid input returns \`400\` with
+\`{"error": "invalid request", "issues": [{"path", "message"}]}\`. Unknown paths
+return \`404\`.
+`.trim();
+
+app.doc31('/openapi.json', (c) => ({
+  openapi: '3.1.0',
+  info: { title: 'Feedsmith API', version: '0.2.0', description: API_OVERVIEW },
+  // The deployment serving this document, so "Try it" and external tools point at it.
+  servers: [{ url: new URL(c.req.url).origin, description: 'This deployment' }],
+  tags: [
+    { name: 'System', description: 'Liveness.' },
+    { name: 'Clients', description: 'The businesses Feedsmith runs feeds for. A client owns one or more sites.' },
+    { name: 'Sites', description: 'One storefront each: its URL, platform, crawl settings and feed password. Use preview to check extraction on a single product page.' },
+    { name: 'Runs', description: 'Crawls. `full` finds every product and reads it; `sweep` re-reads known products for price and stock. Each run records counts, gate results and a change log.' },
+    { name: 'Meta', description: "The site's Meta catalog connection for live updates through the Catalog Batch API, and how Meta processed each run's pushes." },
+    { name: 'Product sets', description: "Named filters over the feed, in Meta's filter format. Synced to the site's Meta catalog, counted live, and available as item lists and as separate feeds." },
+    { name: 'Feeds', description: 'CSV feeds for Commerce Manager: the full catalog and each product set. HTTP Basic with the site ID and feed password.' },
+  ],
+}));
+
+// Scalar UI, pinned to an exact version (no floating CDN script). The page
+// only loads the public OpenAPI document; no app data or credentials.
+app.get(
+  '/docs',
+  Scalar({
+    url: '/openapi.json',
+    pageTitle: 'Feedsmith API',
+    bundle: 'https://cdn.jsdelivr.net/npm/@scalar/api-reference@1.74.0/esm.js',
+    defaultHttpClient: { targetKey: 'shell', clientKey: 'curl' },
+    authentication: { preferredSecurityScheme: 'AdminToken' },
+    hideModels: true,
+    metaData: { title: 'Feedsmith API', description: 'Meta catalog feeds for stores without a feed export.' },
+  }),
+);
 
 // Anything else is a real 404, never a fallback page.
 app.notFound((c) => c.json({ error: 'not found' }, 404));

@@ -12,6 +12,7 @@
 // product with nothing left shows "The product you have requested is not
 // available." with HTTP 200.
 
+import { PLACEHOLDER_IMAGE } from '../core/feed.ts';
 import { absoluteUrl, attrOf, collapseWhitespace, decodeEntities, htmlToText, innerHtmlById, parsePrice } from '../core/html.ts';
 import { mapLimit } from '../core/http.ts';
 import type { DiscoverResult, ProductRef, ReadResult, Variant } from '../core/model.ts';
@@ -80,7 +81,7 @@ export function parseListPage(html: string, base: string): ListPage {
     const pfId = url.searchParams.get('pf_id');
     if (!pfId || !/^\d+$/.test(pfId) || seen.has(pfId)) continue;
     seen.add(pfId);
-    products.push({ key: pfId, url: productUrl(base, pfId, url.searchParams.get('type') ?? '1'), category, department: null, clearance: false, featured: false });
+    products.push({ key: pfId, url: productUrl(base, pfId, url.searchParams.get('type') ?? '1'), category, department: null, clearance: false, featured: false, newItem: false });
   }
   return {
     category,
@@ -94,29 +95,37 @@ export interface DepartmentPage {
   name: string | null;
   catalogIds: number[];
   subGroups: string[];
+  /** Department pages linked from the breadcrumb (normally the page's parents). */
+  breadcrumbs: string[];
 }
+
+const BREADCRUMB = /<nav\b[^>]*aria-label="breadcrumb"[^>]*>[\s\S]*?<\/nav>/gi;
 
 /**
  * A department landing page. Only links inside <main> count: the global nav on
  * every page links every category, which would put everything in every department.
+ * Breadcrumb links are kept apart from sub-groups, since they point up, not down.
  */
 export function parseDepartmentPage(html: string, base: string): DepartmentPage {
   const start = html.search(/<main\b/i);
   const end = html.search(/<\/main>/i);
   const main = start >= 0 ? html.slice(start, end > start ? end : undefined) : '';
   const heading = /<h1[^>]*>\s*<span>([\s\S]*?)<\/span>\s*<\/h1>/i.exec(main);
-  const nav = parseNavLinks(main, base);
+  const nav = parseNavLinks(main.replace(BREADCRUMB, ''), base);
+  const crumbs = parseNavLinks([...main.matchAll(BREADCRUMB)].map((m) => m[0]).join(''), base);
   return {
     name: heading?.[1] ? collapseWhitespace(htmlToText(heading[1])) || null : null,
     catalogIds: nav.catalogIds,
     subGroups: nav.departmentPages,
+    breadcrumbs: crumbs.departmentPages.filter((u) => !nav.departmentPages.includes(u)),
   };
 }
 
 /** Store categories that are promotions rather than product types. */
-export const PROMO_CATEGORY = /clearance|\bsale\b|featured|new arrivals?|gift ideas?|best ?sellers?|deals?\b|specials?\b/i;
+export const PROMO_CATEGORY = /clearance|\bsale\b|featured|new (arrivals?|items?)|gift ideas?|best ?sellers?|deals?\b|specials?\b/i;
 const CLEARANCE_CATEGORY = /clearance|\bsale\b/i;
 const FEATURED_CATEGORY = /featured/i;
+const NEW_CATEGORY = /\bnew (arrivals?|items?)\b/i;
 
 interface CatalogListing {
   id: number;
@@ -148,6 +157,7 @@ export function mergeListings(listings: readonly CatalogListing[], departmentOf:
       department,
       clearance: catalogs.some((c) => c.name !== null && CLEARANCE_CATEGORY.test(c.name)),
       featured: catalogs.some((c) => c.name !== null && FEATURED_CATEGORY.test(c.name)),
+      newItem: catalogs.some((c) => c.name !== null && NEW_CATEGORY.test(c.name)),
     });
   }
   return out;
@@ -241,15 +251,18 @@ function description(html: string): string {
   return htmlToText(inner.replace(/<h2[\s\S]*?<\/h2>/i, ''));
 }
 
+
 function images(html: string, base: string): { main: string | null; extra: string[] } {
   const defaultTag = /<input[^>]*id="defaultImage"[^>]*>/i.exec(html)?.[0];
-  const main = defaultTag ? absoluteUrl(attrOf(defaultTag, 'value') ?? '', base) : null;
+  const value = defaultTag ? attrOf(defaultTag, 'value') : null;
+  const listed = value ? absoluteUrl(value, base) : null;
   const extra: string[] = [];
   for (const m of html.matchAll(/<a[^>]*id="additional_product_url-\d+"[^>]*>/gi)) {
     const href = attrOf(m[0], 'href');
     const abs = href ? absoluteUrl(href, base) : null;
-    if (abs && abs !== main && !extra.includes(abs)) extra.push(abs);
+    if (abs && abs !== listed && !PLACEHOLDER_IMAGE.test(abs) && !extra.includes(abs)) extra.push(abs);
   }
+  const main = listed && !PLACEHOLDER_IMAGE.test(listed) ? listed : (extra.shift() ?? null);
   return { main, extra: extra.slice(0, 10) };
 }
 
@@ -326,6 +339,7 @@ export function parseProductPage(html: string, ref: ProductRef, site: Site): Rea
       department: ref.department,
       clearance: ref.clearance,
       featured: ref.featured,
+      newItem: ref.newItem,
       vehicle: null,
     };
   };
@@ -342,7 +356,8 @@ export function parseProductPage(html: string, ref: ProductRef, site: Site): Rea
   const sku = skuTag ? attrOf(skuTag, 'value') : null;
   if (sku) {
     const price = textById(html, 'price') ?? /<dd class="product-price">([^<]*)<\/dd>/i.exec(html)?.[1] ?? '';
-    const addTag = /<input[^>]*id="ajaxAddToCart"[^>]*>/i.exec(html)?.[0];
+    // Some stores (uwyostore.com) render the same button without the id.
+    const addTag = /<input[^>]*id="ajaxAddToCart"[^>]*>/i.exec(html)?.[0] ?? /<input[^>]*\bname="addcart"[^>]*>/i.exec(html)?.[0];
     const purchasable = addTag !== undefined && !/\sdisabled\b/i.test(addTag);
     // Books echo their title as the "option"; that isn't a size or color.
     const options = textById(html, 'options') ?? '';
@@ -391,9 +406,10 @@ export const prismrbs: Adapter = {
     // sub-groups (e.g. "Gift Ideas") directly, and those must still take their
     // parent department's name.
     const pages = new Map<string, DepartmentPage>();
+    const round = new Map<string, number>();
     let frontier = [...topDepartments];
-    while (frontier.length && pages.size < 200) {
-      const batch = frontier.filter((u) => !pages.has(u));
+    for (let r = 0; frontier.length && pages.size < 200; r++) {
+      const batch = [...new Set(frontier)].filter((u) => !pages.has(u));
       frontier = [];
       const fetched = await mapLimit(batch, site.config.crawlConcurrency, async (url) => {
         const res = await http.getText(url);
@@ -409,11 +425,23 @@ export const prismrbs: Adapter = {
       for (const f of fetched) {
         if (!f) continue;
         pages.set(f.url, f.dept);
-        frontier.push(...f.dept.subGroups.filter((u) => !pages.has(u)));
+        round.set(f.url, r);
+        frontier.push(...[...f.dept.subGroups, ...f.dept.breadcrumbs].filter((u) => !pages.has(u)));
       }
     }
+    // A breadcrumb back up to a page found in an earlier round is a parent, not a
+    // sub-group (uwyostore.com's "Apparel\ Men" links "Apparel"). Other breadcrumb
+    // links still count as sub-groups, as they always did: on
+    // universitysupplystore.com one keeps the catch-all "Bama Merchandise" page
+    // from naming every category (docs/followups.md).
+    const subsOf = (url: string): string[] => {
+      const dept = pages.get(url);
+      const own = round.get(url) ?? 0;
+      return dept ? [...dept.subGroups, ...dept.breadcrumbs.filter((c) => !((round.get(c) ?? own) < own))] : [];
+    };
     const departmentOf = new Map<number, string>();
-    const children = new Set([...pages.values()].flatMap((d) => d.subGroups));
+    const children = new Set([...pages.keys()].flatMap(subsOf));
+    const roots = [...pages.keys()].filter((url) => !children.has(url));
     const assign = (url: string, name: string | null, seen: Set<string>): void => {
       const dept = pages.get(url);
       if (!dept || seen.has(url)) return;
@@ -423,9 +451,15 @@ export const prismrbs: Adapter = {
         catalogIds.add(id);
         if (label && !departmentOf.has(id)) departmentOf.set(id, label);
       }
-      for (const sub of dept.subGroups) assign(sub, label, seen);
+      for (const sub of subsOf(url)) assign(sub, label, seen);
     };
-    for (const url of pages.keys()) if (!children.has(url)) assign(url, null, new Set());
+    // A department's own categories first, so one that the nav lists on its own
+    // (Club Sports) keeps its name rather than taking a parent's that also nests it.
+    for (const url of roots) {
+      const dept = pages.get(url);
+      for (const id of dept?.catalogIds ?? []) if (dept?.name && !departmentOf.has(id)) departmentOf.set(id, dept.name);
+    }
+    for (const url of roots) assign(url, null, new Set());
     // Anything only reachable in a cycle still contributes its categories.
     for (const dept of pages.values()) for (const id of dept.catalogIds) catalogIds.add(id);
 
@@ -478,7 +512,7 @@ export const prismrbs: Adapter = {
     }
     const pfId = url.searchParams.get('pf_id');
     if (!/shop_product_detail\.asp$/i.test(url.pathname) || !pfId || !/^\d+$/.test(pfId)) return null;
-    return { key: pfId, url: productUrl(site.baseUrl, pfId, url.searchParams.get('type') ?? '1'), category: null, department: null, clearance: false, featured: false };
+    return { key: pfId, url: productUrl(site.baseUrl, pfId, url.searchParams.get('type') ?? '1'), category: null, department: null, clearance: false, featured: false, newItem: false };
   },
 
   async read(ref, ctx) {

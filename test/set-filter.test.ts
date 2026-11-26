@@ -21,11 +21,13 @@ const row = (over: Partial<MetaRow> = {}): MetaRow => ({
   gtin: '',
   mpn: '',
   product_type: 'T-Shirts',
+  google_product_category: 'Apparel & Accessories > Clothing > Shirts & Tops',
   additional_image_link: '',
   custom_label_0: 'Bama Merchandise',
   custom_label_1: '',
   custom_label_2: '$25-$50',
   custom_label_3: '',
+  custom_label_4: 'T-Shirts',
   ...over,
 });
 

@@ -310,32 +310,33 @@ const ProductRow = z.object({
   department: z.string().nullable(),
   clearance: z.number(),
   featured: z.number(),
+  new_item: z.number(),
 });
-const PRODUCT_COLUMNS = 'ref_key, url, category, department, clearance, featured';
+const PRODUCT_COLUMNS = 'ref_key, url, category, department, clearance, featured, new_item';
 
 function toRef(raw: unknown): ProductRef {
   const r = ProductRow.parse(raw);
-  return { key: r.ref_key, url: r.url, category: r.category, department: r.department, clearance: r.clearance === 1, featured: r.featured === 1 };
+  return { key: r.ref_key, url: r.url, category: r.category, department: r.department, clearance: r.clearance === 1, featured: r.featured === 1, newItem: r.new_item === 1 };
 }
 
 /** Records discovered products; anything discovered is active again. */
 export async function upsertDiscovered(db: D1Database, siteId: string, runId: string, refs: readonly ProductRef[]): Promise<void> {
   const ts = now();
-  const rows = chunk(refs, Math.floor(MAX_PARAMS / 9));
+  const rows = chunk(refs, Math.floor(MAX_PARAMS / 10));
   await runBatched(
     db,
     rows.map((group) =>
       db
         .prepare(
-          `INSERT INTO products (site_id, ref_key, url, category, department, clearance, featured, status, last_discovered_run_id, missing_full_runs, updated_at) VALUES ${group
-            .map(() => "(?, ?, ?, ?, ?, ?, ?, 'active', ?, 0, ?)")
+          `INSERT INTO products (site_id, ref_key, url, category, department, clearance, featured, new_item, status, last_discovered_run_id, missing_full_runs, updated_at) VALUES ${group
+            .map(() => "(?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, 0, ?)")
             .join(',')}
            ON CONFLICT (site_id, ref_key) DO UPDATE SET url = excluded.url, category = excluded.category,
-             department = excluded.department, clearance = excluded.clearance, featured = excluded.featured,
+             department = excluded.department, clearance = excluded.clearance, featured = excluded.featured, new_item = excluded.new_item,
              status = CASE WHEN products.status = 'not_product' THEN 'not_product' ELSE 'active' END,
              last_discovered_run_id = excluded.last_discovered_run_id, missing_full_runs = 0, updated_at = excluded.updated_at`,
         )
-        .bind(...group.flatMap((r) => [siteId, r.key, r.url, r.category, r.department, r.clearance ? 1 : 0, r.featured ? 1 : 0, runId, ts])),
+        .bind(...group.flatMap((r) => [siteId, r.key, r.url, r.category, r.department, r.clearance ? 1 : 0, r.featured ? 1 : 0, r.newItem ? 1 : 0, runId, ts])),
     ),
   );
 }
@@ -671,4 +672,125 @@ export async function recordSetSync(db: D1Database, siteId: string, slug: string
 
 export async function deleteSet(db: D1Database, siteId: string, slug: string): Promise<void> {
   await db.prepare('DELETE FROM product_sets WHERE site_id = ? AND slug = ?').bind(siteId, slug).run();
+}
+
+// ---------- images ----------
+
+const ImageRow = z.object({
+  source_url: z.string(),
+  status: z.enum(['pending', 'ok', 'bad']),
+  file: z.string().nullable(),
+  width: z.number().nullable(),
+  height: z.number().nullable(),
+});
+export type StoredImage = z.infer<typeof ImageRow>;
+
+export type ImageResult =
+  | { kind: 'ok'; url: string; file: string; width: number; height: number; bytes: number }
+  /** The store answered, and it isn't a usable image. Checked again at the next refresh. */
+  | { kind: 'bad'; url: string; error: string }
+  /** Couldn't tell. A copied image stays in use; a pending one stays pending. */
+  | { kind: 'retry'; url: string; error: string };
+
+export async function listImages(db: D1Database, siteId: string): Promise<StoredImage[]> {
+  const { results } = await db.prepare('SELECT source_url, status, file, width, height FROM images WHERE site_id = ?').bind(siteId).all();
+  return results.map((r) => ImageRow.parse(r));
+}
+
+/** Adds new image links and drops ones no item uses any more. */
+export async function reconcileImages(db: D1Database, siteId: string, urls: readonly string[]): Promise<{ added: number; removed: number }> {
+  const { results } = await db.prepare('SELECT source_url FROM images WHERE site_id = ?').bind(siteId).all();
+  const known = new Set(results.map((r) => z.object({ source_url: z.string() }).parse(r).source_url));
+  const wanted = new Set(urls);
+  const added = [...wanted].filter((u) => !known.has(u));
+  const removed = [...known].filter((u) => !wanted.has(u));
+  await runBatched(db, [
+    ...chunk(added, Math.floor(MAX_PARAMS / 2)).map((group) =>
+      db
+        .prepare(`INSERT OR IGNORE INTO images (site_id, source_url) VALUES ${group.map(() => '(?, ?)').join(',')}`)
+        .bind(...group.flatMap((u) => [siteId, u])),
+    ),
+    ...chunk(removed, MAX_PARAMS - 1).map((group) =>
+      db.prepare(`DELETE FROM images WHERE site_id = ? AND source_url IN (${group.map(() => '?').join(',')})`).bind(siteId, ...group),
+    ),
+  ]);
+  return { added: added.length, removed: removed.length };
+}
+
+/** Images to fetch: never tried first, then failed tries, then the longest since they were read. */
+export async function imagesDue(db: D1Database, siteId: string, refreshBefore: string, limit: number): Promise<string[]> {
+  const { results } = await db
+    .prepare(
+      `SELECT source_url FROM images WHERE site_id = ? AND (status = 'pending' OR checked_at < ?)
+       ORDER BY checked_at IS NOT NULL, checked_at LIMIT ?`,
+    )
+    .bind(siteId, refreshBefore, limit)
+    .all();
+  return results.map((r) => z.object({ source_url: z.string() }).parse(r).source_url);
+}
+
+export async function saveImageResults(db: D1Database, siteId: string, results: readonly ImageResult[]): Promise<void> {
+  const ts = now();
+  await runBatched(
+    db,
+    results.map((r) => {
+      switch (r.kind) {
+        case 'ok':
+          return db
+            .prepare("UPDATE images SET status = 'ok', file = ?, width = ?, height = ?, bytes = ?, error = NULL, checked_at = ? WHERE site_id = ? AND source_url = ?")
+            .bind(r.file, r.width, r.height, r.bytes, ts, siteId, r.url);
+        case 'bad':
+          return db
+            .prepare("UPDATE images SET status = 'bad', file = NULL, width = NULL, height = NULL, bytes = NULL, error = ?, checked_at = ? WHERE site_id = ? AND source_url = ?")
+            .bind(r.error.slice(0, 200), ts, siteId, r.url);
+        case 'retry':
+          // A copied image keeps its old checked_at, so it stays due on the next run.
+          return db
+            .prepare("UPDATE images SET error = ?, checked_at = CASE WHEN status = 'pending' THEN ? ELSE checked_at END WHERE site_id = ? AND source_url = ?")
+            .bind(r.error.slice(0, 200), ts, siteId, r.url);
+        default: {
+          const unreachable: never = r;
+          throw new Error(`unhandled image result ${JSON.stringify(unreachable)}`);
+        }
+      }
+    }),
+  );
+}
+
+export interface ImageStats {
+  total: number;
+  copied: number;
+  pending: number;
+  bad: number;
+  underMinSize: number;
+  bytes: number;
+  problems: Array<{ url: string; error: string }>;
+}
+
+export async function imageStats(db: D1Database, siteId: string, minPx: number): Promise<ImageStats> {
+  const counts = z
+    .object({ total: z.number(), copied: z.number().nullable(), pending: z.number().nullable(), bad: z.number().nullable(), small: z.number().nullable(), bytes: z.number().nullable() })
+    .parse(
+      await db
+        .prepare(
+          `SELECT COUNT(*) AS total, SUM(status = 'ok') AS copied, SUM(status = 'pending') AS pending, SUM(status = 'bad') AS bad,
+             SUM(status = 'ok' AND (width < ?1 OR height < ?1)) AS small, SUM(bytes) AS bytes
+           FROM images WHERE site_id = ?2`,
+        )
+        .bind(minPx, siteId)
+        .first(),
+    );
+  const { results } = await db.prepare('SELECT source_url, error FROM images WHERE site_id = ? AND error IS NOT NULL LIMIT 20').bind(siteId).all();
+  return {
+    total: counts.total,
+    copied: counts.copied ?? 0,
+    pending: counts.pending ?? 0,
+    bad: counts.bad ?? 0,
+    underMinSize: counts.small ?? 0,
+    bytes: counts.bytes ?? 0,
+    problems: results.map((r) => {
+      const row = z.object({ source_url: z.string(), error: z.string() }).parse(r);
+      return { url: row.source_url, error: row.error };
+    }),
+  };
 }
